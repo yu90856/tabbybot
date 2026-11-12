@@ -706,6 +706,24 @@ class GuiApp:
         except Exception:
             pass
 
+    def cancel_delivery_quest(self) -> None:
+        from tabbybot.client import cancel_quest
+        prompt = self._current_delivery_prompt()
+        if not prompt or prompt.get("quest_id") is None:
+            raise GuiError("目前沒有可取消的任務。")
+        cancel_quest(self.config, self._ensure_token(), int(prompt["quest_id"]))
+        log.info("已取消任務：%s", prompt.get("title") or prompt.get("quest_id"))
+        self._set_delivery_prompt(None)
+        controller = self._holder.get("controller")
+        if controller is not None:
+            controller.pending_delivery = None
+            controller._quests_dirty = True
+            controller.quest_accept_checked_at = 0.0
+        try:
+            self.refresh_quests()
+        except Exception:
+            pass
+
     def skip_delivery(self) -> None:
         prompt = self._current_delivery_prompt()
         if not prompt:
@@ -1416,6 +1434,9 @@ def make_handler(app: GuiApp):
                 return {"ok": True}
             if path == "/api/quests/deliver":
                 app.confirm_delivery()
+                return {"ok": True}
+            if path == "/api/quests/cancel":
+                app.cancel_delivery_quest()
                 return {"ok": True}
             if path == "/api/quests/skip":
                 app.skip_delivery()

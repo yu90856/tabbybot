@@ -1032,6 +1032,11 @@
       await refresh();
     } catch (err) { toast(err.message); await refresh(); }
   });
+  $("btn-delivery-cancel").addEventListener("click", async () => {
+    if (!confirm("取消任務也會佔用每日領取次數，確定取消？")) return;
+    try { await api("/api/quests/cancel", {}); toast("已取消任務"); await refresh(); }
+    catch (err) { toast(err.message); await refresh(); }
+  });
   $("btn-delivery-close").addEventListener("click", () => {
     const st = window.__lastState || {};
     window.__deliveryClosed = (st.pending_delivery || {}).quest_id;

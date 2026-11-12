@@ -256,6 +256,15 @@ def _quest_headers(config: AppConfig, token: str) -> dict[str, str]:
     }
 
 
+def cancel_quest(config: AppConfig, token: str, quest_id: int) -> dict[str, Any]:
+    """Cancel an accepted quest (game rule: still uses one of today's quest slots)."""
+    url = config.api_base.rstrip("/") + "/progression/quests/cancel"
+    status, payload, _ = _json_request(url, method="POST", body={"questId": int(quest_id)}, headers=_quest_headers(config, token), timeout=10)
+    if status >= 400:
+        raise QuestError(payload.get("message") or payload.get("code") or f"取消任務失敗 HTTP {status}")
+    return payload
+
+
 def fetch_quest_delivery(config: AppConfig, token: str, quest_id: int) -> dict[str, Any]:
     url = config.api_base.rstrip("/") + f"/quests/delivery/{int(quest_id)}"
     status, payload, _ = _json_request(url, method="GET", headers=_quest_headers(config, token), timeout=10)
