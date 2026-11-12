@@ -1,0 +1,5 @@
+eth-account>=0.13,<1
+cryptography>=43,<47
+websockets>=13,<16
+PyYAML>=6,<7
+mnemonic>=0.20,<1

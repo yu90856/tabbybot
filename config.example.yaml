@@ -1,0 +1,21 @@
+# 複製為 config.yaml 後再改。不要把私鑰寫進這個檔案。
+api_base: https://game.tabby.meme/api
+realtime_url: wss://game.tabby.meme/api/realtime
+origin: https://game.tabby.meme
+
+hunt:
+  map_id: 2          # 北部雪地；須為已有導航資料的地圖
+  level_min: 1
+  level_max: 9999
+  elite_only: false
+
+market:
+  interval_sec: 8    # 最短 5 秒
+  qualities: ["L3", "L4"]   # 或 ["*"] 表示不限品質
+  min_price: 0
+  max_price: 200
+  name_contains: ""  # 商品名稱關鍵字，空白表示不限
+
+farm:
+  enabled: true
+  target_level: 30   # 沒任務或等待確認時，優先打接近此等級的怪

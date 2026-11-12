@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>TABBY／維洛傳說</title>
+  <link rel="stylesheet" href="/app.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo" aria-hidden="true">🐱</span>
+      <div>
+        <div class="brand-name">TABBY／維洛傳說</div>
+        <div class="brand-sub">本機小幫手 · 不會自動購買</div>
+      </div>
+    </div>
+    <nav class="tabs" role="tablist">
+      <button type="button" class="tab is-on" data-tab="game" id="tab-game">遊戲控制台</button>
+      <button type="button" class="tab" data-tab="character" id="tab-character">角色</button>
+      <button type="button" class="tab" data-tab="market" id="tab-market">商城與監控</button>
+    </nav>
+    <div class="top-actions">
+      <div class="pill" id="pill">尚未解鎖</div>
+      <label class="check top-check" id="auto-unlock-wrap" hidden>
+        <input type="checkbox" id="opt-auto-unlock" checked /> 開啟時自動解鎖
+      </label>
+      <button type="button" class="ghost" id="btn-lock" hidden>鎖定錢包</button>
+    </div>
+  </header>
+  <div class="alert-banner" id="alert-banner" hidden>
+    <span id="alert-text"></span>
+    <button type="button" class="ghost" id="btn-alert-clear">知道了</button>
+  </div>
+
+  <section class="gate" id="gate">
+    <div class="gate-card">
+      <h1 id="gate-title">先解鎖錢包</h1>
+      <p class="hint" id="gate-hint">主密碼只留在這台電腦的記憶體裡，用來打開本機保險庫。</p>
+      <form id="form-setup" hidden>
+        <label>私鑰或助記詞
+          <input type="password" id="setup-secret" autocomplete="off" placeholder="貼上私鑰，或 12–24 個英文單字" />
+        </label>
+        <label>設定主密碼（至少 8 個字）
+          <input type="password" id="setup-pass" autocomplete="new-password" />
+        </label>
+        <label>再輸入一次主密碼
+          <input type="password" id="setup-confirm" autocomplete="new-password" />
+        </label>
+        <label class="check"><input type="checkbox" id="setup-remember" checked /> 記住此電腦（開啟時自動解鎖）</label>
+        <button type="submit" class="primary wide">保存並開始使用</button>
+        <p class="warn">請用幾乎沒有資產的專用錢包。不要匯入常用錢包。</p>
+      </form>
+      <form id="form-unlock">
+        <label>主密碼
+          <input type="password" id="unlock-pass" autocomplete="current-password" />
+        </label>
+        <label class="check"><input type="checkbox" id="unlock-remember" checked /> 記住此電腦</label>
+        <p class="tiny">勾選後，主密碼會存進這台 Mac 的鑰匙圈，下次開啟會自動解鎖。保險庫檔案本身仍是加密的。</p>
+        <button type="submit" class="primary wide">解鎖</button>
+        <button type="button" class="link" id="btn-show-setup">改用新的錢包做首次設定</button>
+      </form>
+      <p class="error" id="gate-error" hidden></p>
+    </div>
+  </section>
+
+  <main id="workspace" hidden>
+    <section class="page is-on" id="page-game">
+      <aside class="col left">
+        <article class="card">
+          <h2>戰鬥策略</h2>
+          <label class="check"><input type="checkbox" id="opt-auto" checked /> 自動追擊與攻擊</label>
+          <label class="check"><input type="checkbox" id="opt-potion" checked /> 生命低於一半時自動喝水</label>
+          <label class="check"><input type="checkbox" id="opt-potion-pvp" /> 被玩家攻擊時自動喝水</label>
+          <label class="check"><input type="checkbox" id="opt-elite" /> 只打精英怪</label>
+          <label class="check"><input type="checkbox" id="opt-prefer-elite" checked /> 附近有精英時優先打精英</label>
+          <label>精英偵測範圍
+            <input type="number" id="elite-view-range" min="200" max="2000" step="50" value="700" />
+          </label>
+          <label>近戰職業：水低於 N 瓶不打精英
+            <input type="number" id="elite-potion-min" min="0" max="999" step="1" value="3" />
+          </label>
+          <label class="check"><input type="checkbox" id="opt-cluster" checked /> 風箏（弓手）</label>
+          <label class="check"><input type="checkbox" id="opt-kite-elite" /> 僅風箏精英</label>
+          <p class="tiny" id="cluster-note">開風箏：繞著怪堆外圈邊走邊射，不把怪拉離家太遠，也不從怪物身上穿過去；殺完一隻馬上打下一隻，清空後重生快就原地等。關：站著射。「僅風箏精英」開：只對精英風箏，普通怪站著射。</p>
+          <p class="tiny" id="elite-note">打完目前目標後，再轉打偵測範圍內的精英（預設 700，約莫畫面上可見的距離）。近戰：藥水少於 N 瓶不主動打精英，附近已有人在打的會一起參與。</p>
+          <div class="btn-row">
+            <button type="button" class="primary wide" id="btn-hunt-start">開始打怪</button>
+            <button type="button" class="danger wide" id="btn-hunt-stop">停止打怪</button>
+            <button type="button" class="secondary wide" id="btn-hunt-stop-now">立刻停止</button>
+          </div>
+          <p class="tiny">停止打怪不會登出：沒有在打架就原地站著；有目標會先打完再停。立刻停止則馬上站住。被打時會還擊，但不會跑去打新的怪。再按開始打怪會從原地繼續，不必重登。</p>
+        </article>
+        <article class="card">
+          <h2>地圖與復活</h2>
+          <div class="current-map" id="current-map">目前所在地圖　尚未連線</div>
+          <div class="coords" id="coords">座標　—</div>
+          <div class="map-grid" id="map-grid"></div>
+          <label class="check"><input type="checkbox" id="opt-return" checked /> 復活後自動進入所選地圖</label>
+          <p class="tiny">連線後點選地圖會先走到對應入口再請求切圖；伺服器仍會檢查距離。廢棄遺跡、秘寶之地需要特殊道具，不會從這裡進入。也可在小地圖上點一下走到該座標。</p>
+          <button type="button" class="secondary wide" id="btn-stop-move">停止移動</button>
+        </article>
+        <article class="card" hidden style="display:none">
+          <h2>卡住通知</h2>
+          <label>Grok Bot 通知網址
+            <input type="url" id="webhook-url" placeholder="https://…" autocomplete="off" />
+          </label>
+          <label>密鑰
+            <input type="password" id="webhook-key" placeholder="留空表示不變" autocomplete="new-password" />
+          </label>
+          <div class="btn-row">
+            <button type="button" class="secondary wide" id="btn-webhook-save">儲存</button>
+            <button type="button" class="secondary wide" id="btn-webhook-test">測試通知</button>
+          </div>
+          <p class="tiny" id="webhook-status">外掛卡住時會跳 Mac 通知、寫進 ~/.tabbybot/alerts.log，並通知這個網址（10 分鐘最多一次）。密鑰存在本機鑰匙圈。</p>
+        </article>
+      </aside>
+
+      <section class="col center">
+        <article class="card quest-card">
+          <div class="quest-head">
+            <h2>任務</h2>
+            <button type="button" class="secondary" id="btn-quest-refresh">重新整理任務</button>
+          </div>
+          <p class="quest-status" id="quest-status">尚未讀取任務</p>
+          <label class="check"><input type="checkbox" id="opt-auto-quest" checked /> 完成後自動接打怪任務</label>
+          <label class="check"><input type="checkbox" id="opt-task-limited" checked /> 只打任務怪</label>
+          <label class="check"><input type="checkbox" id="opt-quest-map" checked /> 按任務地圖自動進圖</label>
+          <label class="check"><input type="checkbox" id="opt-auto-replace" /> 需要交道具或裝備的任務自動換掉</label>
+          <label class="check"><input type="checkbox" id="opt-skip-vendetta" /> 自動跳過仇殺任務（擊敗玩家）</label>
+          <label class="check"><input type="checkbox" id="opt-auto-farm" checked /> 沒任務或等待確認時自動練功</label>
+          <label class="inline-level">練功等級
+            <select id="farm-level"><option value="10">Lv10</option><option value="20">Lv20</option><option value="30" selected>Lv30</option><option value="40">Lv40</option><option value="50">Lv50</option></select>
+          </label>
+          <div class="btn-row">
+            <button type="button" class="primary wide" id="btn-daily-start">開始每日任務</button>
+            <button type="button" class="danger wide" id="btn-daily-stop">停止每日任務</button>
+          </div>
+          <p class="tiny">打怪任務會自動接取並完成。需要交付裝備或消耗道具的任務預設會暫停，列出將要交出的物品與數量，經你按「確認交付」後才會提交；若開啟自動練功，等待確認期間會先去打練功等級的怪。「自動換掉」預設關閉；遊戲沒有更換任務的接口，開啟後只會略過尚未接取的交付任務。廢棄遺跡、秘寶之地不會使用入場券。</p>
+          <div class="table-wrap quest-table-wrap">
+            <table id="quest-table">
+              <thead>
+                <tr><th>任務</th><th>地圖</th><th>進度</th><th>狀態</th></tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </article>
+        <article class="card eff-card">
+          <div class="card-head"><h2>打怪效率</h2>
+            <button type="button" class="ghost" id="btn-eff-reset">重設</button></div>
+          <div class="eff-wrap"><table class="eff-table" id="eff-table">
+            <thead><tr><th>等級</th><th>擊殺數</th><th>平均經驗/隻</th><th>平均秒/隻<br><small>含走路、等重生</small></th><th>經驗/分鐘</th><th>喝水/隻</th><th>放棄次數</th></tr></thead>
+            <tbody id="eff-body"><tr><td colspan="7">還沒有資料</td></tr></tbody>
+          </table></div>
+          <p class="tiny" id="eff-note">只用實際量到的數據；擊殺少於 5 隻標示「樣本不足」。</p>
+        </article>
+        <article class="card log-card">
+          <div class="log-tabs">
+            <span class="is-on">運行日誌</span>
+          </div>
+          <pre class="log" id="log" aria-live="polite"></pre>
+        </article>
+      </section>
+
+      <aside class="col right">
+        <article class="card minimap-card" id="minimap-card">
+          <div class="card-head mini-head">
+            <h2>實時小地圖</h2>
+            <div class="mini-tools">
+              <div class="seg" role="group" aria-label="小地圖模式">
+                <button type="button" class="seg-btn" id="btn-mini-simple" data-mini-mode="simple">簡化</button>
+                <button type="button" class="seg-btn" id="btn-mini-detail" data-mini-mode="detail">詳細</button>
+              </div>
+              <button type="button" class="ghost mini-zoom" id="btn-mini-out" title="縮小">−</button>
+              <span class="mini-zoom-text" id="mini-zoom-text">1.0×</span>
+              <button type="button" class="ghost mini-zoom" id="btn-mini-in" title="放大">＋</button>
+            </div>
+          </div>
+          <canvas id="minimap" width="640" height="400"></canvas>
+          <div class="mini-caption" id="mini-caption">尚未進入地圖</div>
+          <div class="legend" id="mini-legend">
+            <span><i class="dot you"></i>你</span>
+            <span><i class="dot target"></i>目標等級怪</span>
+            <span><i class="dot mob"></i>其他怪物</span>
+            <span><i class="dot elite"></i>精英</span>
+            <span><i class="dot peer"></i>玩家</span>
+            <span><i class="dot npc"></i>NPC</span>
+            <span><i class="portal-ic"></i>傳送點</span>
+            <span><i class="line"></i>路線</span>
+            <span><i class="line aim"></i>目前目標</span>
+            <span><i class="ring"></i>射程／風箏距離</span>
+            <span><i class="ring cluster"></i>怪堆</span>
+          </div>
+          <p class="tiny">以你為中心；滾輪或 ＋/− 縮放。點小地圖可走到該位置。</p>
+        </article>
+        <article class="card">
+          <h2>戰鬥動態</h2>
+          <p class="feed" id="combat-feed">等待開始打怪</p>
+          <p class="tiny" id="session-stats">本次掛機：—</p>
+          <p class="tiny" id="farm-info">—</p>
+          <div class="stats">
+            <div><strong id="stat-kills">0</strong><span>擊敗</span></div>
+            <div><strong id="stat-damage">0</strong><span>傷害</span></div>
+            <div><strong id="stat-hits">0</strong><span>命中</span></div>
+            <div><strong id="stat-potions">0</strong><span>藥水</span></div>
+            <div><strong id="stat-stamina">—</strong><span>疲勞剩餘</span></div>
+            <div><strong id="stat-exp">—</strong><span>經驗</span></div>
+          </div>
+          <button type="button" class="secondary wide" id="btn-use-potion">使用生命藥水</button>
+        </article>
+        <article class="card chat-card" hidden style="display:none">
+          <h2>世界聊天</h2>
+          <pre class="chat-log" id="chat-log">連線後會顯示收到的世界訊息。只有你按送出才會發言。</pre>
+          <div class="chat-row">
+            <input type="text" id="chat-input" maxlength="200" placeholder="輸入世界訊息" autocomplete="off" />
+            <button type="button" class="secondary" id="btn-chat-send">送出</button>
+          </div>
+        </article>
+      </aside>
+    </section>
+
+    <section class="page" id="page-character">
+      <div class="char-layout">
+        <article class="card char-info">
+          <div class="quest-head">
+            <h2>角色資訊</h2>
+            <button type="button" class="secondary" id="btn-character-refresh">重新整理</button>
+          </div>
+          <p class="quest-status" id="character-status">尚未讀取角色資料</p>
+          <div class="char-name" id="ci-name">—</div>
+          <div class="char-level" id="ci-level">等級：—</div>
+          <img class="char-portrait" id="ci-portrait" alt="" src="/assets/warrior-idle.webp" />
+          <div class="tiny" id="ci-exp-text">經驗 — / —</div>
+          <div class="exp-bar"><div class="exp-fill" id="ci-exp-fill" style="width:0%"></div></div>
+          <div class="char-stats" id="ci-stats"></div>
+          <div class="char-power"><span>⚔️ 戰鬥力</span><strong id="ci-power">—</strong></div>
+          <div class="char-stats" id="ci-stats2"></div>
+          <p class="tiny" id="ci-source"></p>
+        </article>
+        <div class="char-mid">
+          <article class="card">
+            <h2>角色裝備</h2>
+            <div class="gear-row" id="gear-row"></div>
+          </article>
+          <article class="card">
+            <h2>背包物品</h2>
+            <div class="bag-tabs" id="bag-tabs"></div>
+            <div class="bag-grid" id="bag-grid"></div>
+          </article>
+        </div>
+        <article class="card item-detail" id="item-detail">
+          <h2>物品詳情</h2>
+          <div class="detail-empty" id="detail-empty">點選裝備或背包物品查看詳情</div>
+          <div id="detail-body" hidden>
+            <div class="detail-icon" id="detail-icon"></div>
+            <div class="detail-name" id="detail-name"></div>
+            <div class="detail-tag" id="detail-tag"></div>
+            <div class="detail-desc" id="detail-desc"></div>
+            <div class="detail-attrs" id="detail-attrs"></div>
+            <div class="detail-compare" id="detail-compare"></div>
+            <div class="btn-row detail-actions" id="detail-actions"></div>
+          </div>
+          <p class="tiny">只有你按下並確認後才會穿戴、卸下或使用；沒有上架、出售或丟棄功能。</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="page" id="page-market">
+      <aside class="col left">
+        <article class="card">
+          <h2>掃描條件</h2>
+          <label>商品名稱（可留空）
+            <input type="text" id="market-name" placeholder="例如：劍" />
+          </label>
+          <label>最高價格（不含此價格）
+            <input type="number" id="market-max" min="1" step="1" value="200" />
+          </label>
+          <div class="btn-row">
+            <button type="button" class="primary wide" id="btn-market-start">開始商城監控</button>
+            <button type="button" class="danger wide" id="btn-market-stop">停止監控</button>
+          </div>
+          <p class="tiny">只會顯示符合條件的上架，不會自動購買。</p>
+        </article>
+      </aside>
+      <section class="col center wide">
+        <article class="card log-card">
+          <div class="log-tabs">
+            <span class="is-on">監控結果</span>
+            <em id="market-summary">尚未開始監控</em>
+          </div>
+          <div class="table-wrap">
+            <table id="market-table">
+              <thead>
+                <tr><th>商品</th><th>品質</th><th>價格</th><th>編號</th></tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </article>
+      </section>
+    </section>
+  </main>
+  <div class="modal" id="delivery-modal" hidden>
+    <div class="modal-card" role="dialog" aria-labelledby="delivery-title">
+      <h2 id="delivery-title">確認交付任務</h2>
+      <p class="quest-status" id="delivery-quest">—</p>
+      <p id="delivery-count">將消耗以下物品，確認後才會交給伺服器。</p>
+      <ul class="delivery-items" id="delivery-items"></ul>
+      <p class="tiny" id="delivery-note"></p>
+      <div class="btn-row">
+        <button type="button" class="primary wide" id="btn-delivery-confirm">確認交付</button>
+        <button type="button" class="danger wide" id="btn-delivery-skip">跳過</button>
+        <button type="button" class="secondary wide" id="btn-delivery-close">關閉</button>
+      </div>
+    </div>
+  </div>
+  <div class="modal" id="confirm-modal" hidden>
+    <div class="modal-card" role="dialog" aria-labelledby="confirm-title">
+      <h2 id="confirm-title">請確認</h2>
+      <p id="confirm-text">—</p>
+      <div class="btn-row">
+        <button type="button" class="primary wide" id="btn-confirm-ok">確認</button>
+        <button type="button" class="danger wide" id="btn-confirm-cancel">取消</button>
+      </div>
+    </div>
+  </div>
+  <p class="toast" id="toast" hidden></p>
+  <script src="/app.js"></script>
+</body>
+</html>
