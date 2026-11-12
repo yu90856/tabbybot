@@ -3144,7 +3144,7 @@ class HuntController:
         offsets = (0.0, 0.3, -0.3, 0.6, -0.6, 0.9, -0.9, 1.2, -1.2, 1.57, -1.57, 2.0, -2.0, 2.5, -2.5)
         for off in offsets:
             ang = base + off
-            for dist in (need, KITE_RETREAT_STEP, 220.0, 160.0):
+            for dist in ((120.0, 160.0) if near_center else (need, KITE_RETREAT_STEP, 220.0, 160.0)):
                 raw = (me[0] + math.cos(ang) * dist, me[1] + math.sin(ang) * dist)
                 goal = raw
                 if not self._point_walkable(goal):
@@ -3163,9 +3163,12 @@ class HuntController:
                     hold * 2000.0 + band * 800.0 + gap + 0.2 * step
                     + 0.3 * self.wall_distance(goal) - 40.0 * abs(off)
                 )
-                if near_center:  # normal mobs: circle close to the pile, not away from it
+                if near_center:  # normal mobs: orbit sideways around the pile instead of backing straight away
                     dc = math.dist(goal, near_center)
-                    score -= 8.0 * max(0.0, dc - 200.0) + (0.0 if gap < 240.0 else gap - 240.0)
+                    score = (
+                        band * 800.0 - 3.0 * abs(gap - 180.0) - 30.0 * max(0.0, dc - 200.0)
+                        - 80.0 * abs(abs(off) - 1.57) + 0.1 * self.wall_distance(goal)
+                    )
                 candidates.append((score, goal))
         if candidates:
             candidates.sort(key=lambda row: -row[0])
@@ -3225,7 +3228,16 @@ class HuntController:
         mx, my = float(monster["x"]), float(monster["y"])
         self._mark_retreat(distance, now)
         site = self.clusters.site(self.cluster_site_id) if not self.is_elite(monster) else None
-        goal = self._radial_retreat_goal((mx, my), distance, (site.x, site.y) if site else None)
+        if self.is_elite(monster):
+            orbit = None
+        elif site is not None:
+            orbit = (site.x, site.y)
+        else:  # no pile locked yet: orbit the nearby mobs (or the target itself) instead of backing straight off
+            pts = [(float(m["x"]), float(m["y"])) for m in self.monsters.monsters.values()
+                   if isinstance(m, dict) and m.get("x") is not None and m.get("y") is not None
+                   and math.dist((float(m["x"]), float(m["y"])), (mx, my)) <= 400.0]
+            orbit = (sum(p[0] for p in pts) / len(pts), sum(p[1] for p in pts) / len(pts)) if pts else (mx, my)
+        goal = self._radial_retreat_goal((mx, my), distance, orbit)
         anchor = (self._engage or {}).get("anchor") if (self._engage or {}).get("id") == encounter_id else None
         if goal is None or self.retreat_blocked(now):
             self.kite_note = "後面是牆，原地射擊"
@@ -3649,6 +3661,20 @@ class HuntController:
         if self.position is None:
             return None
         self.update_clusters(now)
+        if self.prefer_elite:  # a visible elite beats the pile: go shoot it first
+            elite = next((row for row in candidates if self.is_elite(row[2]) and row[0] <= self.elite_view_range), None)
+            if elite is not None:
+                cur = self.attack_target or self.chase_target
+                cur_is_elite = cur is not None and self.is_elite(self.monsters.monsters.get(cur) or {})
+                if not cur_is_elite and not (cur and cur in self._own_hit_ids):
+                    if cur != elite[1]:
+                        log.info("附近有精英，先去打精英")
+                    self.attack_target = None
+                    self.chase_target = None
+                    self.cluster_note = "附近有精英，優先打精英"
+                    return None
+                if cur_is_elite:
+                    return None
         allowed = {row[1]: row for row in candidates}
         site = self.clusters.site(self.cluster_site_id)
         if site is not None and now < self._site_lock.get(site.id, 0.0):
