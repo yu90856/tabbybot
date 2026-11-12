@@ -2504,6 +2504,8 @@ class HuntController:
             except (TypeError, ValueError):
                 level = DEFAULT_FARM_LEVEL
             self.farm_target_level = max(1, min(9999, level))
+        # 關掉自動任務與任務地圖時，也不要再「任務優先」跑去任務地圖
+        self.quest_first = bool(self.auto_quest or self.quest_map_auto or self.daily_mode)
         if self.auto_quest or self.daily_mode:
             self._quests_dirty = True
         self.refresh_quest_map_target()
@@ -3349,6 +3351,7 @@ class HuntController:
             if distance >= 520 or now > lr["until"] or (distance > 300 and distance < far - 40):
                 self._leash_run = None
                 self._kite_contacts = 0
+                self._leash_cool_until = now + 20.0
                 log.info("精英脫仇恨（距離 %.0f），回頭追打", distance)
                 return None
             px, py = self.position.x, self.position.y
@@ -3359,9 +3362,15 @@ class HuntController:
             if packet is not None:
                 self.kite_note = self.status = f"精英貼身，後撤脫仇恨（距離 {distance:.0f}）"
                 return packet
+            self.kite_note = "精英貼身但退路受阻，原地射擊"
+            return None
         if distance <= KITE_ABORT_CONTACT_DIST:
             self._kite_contacts += 1
             if self._kite_contacts >= KITE_ABORT_CONTACTS:
+                if self.is_elite(monster) and now < getattr(self, "_leash_cool_until", 0.0):
+                    self._kite_contacts = 0
+                    self.kite_note = "精英剛脫過仇恨又貼上，先原地打"
+                    return None
                 if self.is_elite(monster):
                     self._leash_run = {"id": encounter_id, "until": now + 8.0, "best": distance}
                     log.info("精英貼身拉不開，先後撤脫仇恨再回頭打")
