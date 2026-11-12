@@ -17,6 +17,7 @@ from tabbybot.client import (
     QuestLimitReached,
     RealtimeSession,
     accept_quest,
+    cancel_quest,
     claim_defeat,
     fetch_quest_delivery,
     fetch_quests,
@@ -502,6 +503,7 @@ class HuntController:
         self._quest_completion_state: dict[str, bool] = {}
         self.auto_replace = False
         self.skip_vendetta = False
+        self.vendetta_cancelled_ids: set[int] = set()
         self.pending_delivery: dict[str, Any] | None = None
         self.skipped_quest_ids: set[int] = set()
         self.auto_farm = True
@@ -2280,7 +2282,11 @@ class HuntController:
         if self.quest_accept_blocked_date == today:
             return
         if self.pending_delivery:
-            return
+            pend = self.pending_delivery
+            if not (self.skip_vendetta and str(pend.get("objective_type") or "").upper() == "VENDETTA"):
+                return
+            self.pending_delivery = None
+            self.quest_accept_checked_at = 0.0
         if has_active_monster_quest(self.quests):
             return
         if self.quest_idle(now):
@@ -2302,11 +2308,24 @@ class HuntController:
                 quests = fetch_quests(config, token)
                 result["quests"] = quests
                 if skip_vendetta:
-                    from tabbybot.quests import objective_type as _ot, quest_id as _qid
+                    from tabbybot.quests import objective_type as _ot, quest_id as _qid, is_completed
+                    _cancelled = False
                     for _q in quests:
                         if str(_ot(_q) or "").upper() == "VENDETTA" and _qid(_q) is not None:
                             skipped_ids.add(int(_qid(_q)))
                             self.skipped_quest_ids.add(int(_qid(_q)))
+                            if _q.get("accepted") and not is_completed(_q) and int(_qid(_q)) not in self.vendetta_cancelled_ids:
+                                try:
+                                    cancel_quest(config, token, int(_qid(_q)))
+                                    self.vendetta_cancelled_ids.add(int(_qid(_q)))
+                                    _cancelled = True
+                                    log.info("已自動取消已接的仇殺任務：%s", quest_title(_q))
+                                except QuestError as exc:
+                                    self.vendetta_cancelled_ids.add(int(_qid(_q)))
+                                    log.info("自動取消仇殺任務失敗：%s", exc)
+                    if _cancelled:
+                        quests = fetch_quests(config, token)
+                        result["quests"] = quests
                 step = next_daily_step(quests, current_map, auto_replace=auto_replace, skipped_ids=skipped_ids)
                 kind = step.get("kind")
                 if kind == "hunt":

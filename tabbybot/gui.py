@@ -575,7 +575,8 @@ class GuiApp:
             "farm_target_level": self.quest_options.get("farm_target_level", DEFAULT_FARM_LEVEL),
         })
         controller.skipped_quest_ids = set(self.skipped_quest_ids)
-        if self.pending_delivery and not controller.pending_delivery:
+        if self.pending_delivery and not controller.pending_delivery and not (
+                self.quest_options.get("skip_vendetta") and str(self.pending_delivery.get("objective_type") or "").upper() == "VENDETTA"):
             controller.pending_delivery = self.pending_delivery
 
     def _safe_refresh_quests(self) -> None:
@@ -654,6 +655,9 @@ class GuiApp:
         controller = self._holder.get("controller")
         if controller is not None and getattr(controller, "pending_delivery", None):
             return controller.pending_delivery
+        if controller is not None and self.pending_delivery and self.pending_delivery.get("quest_id") is not None \
+                and int(self.pending_delivery["quest_id"]) in getattr(controller, "vendetta_cancelled_ids", set()):
+            self.pending_delivery = None
         return self.pending_delivery
 
     def _set_delivery_prompt(self, prompt: dict[str, Any] | None) -> None:
