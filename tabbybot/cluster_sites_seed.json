@@ -1,0 +1,289 @@
+{
+ "explored_maps": [
+  9
+ ],
+ "maps": {
+  "9": [
+   {
+    "x": 4189,
+    "y": 5963,
+    "max_alive": 2,
+    "levels": [
+     40
+    ],
+    "respawn": 332.0,
+    "elite": true
+   },
+   {
+    "x": 2318,
+    "y": 5812,
+    "max_alive": 5,
+    "levels": [
+     40
+    ],
+    "respawn": 24.0,
+    "elite": true
+   },
+   {
+    "x": 3754,
+    "y": 4260,
+    "max_alive": 6,
+    "levels": [
+     40
+    ],
+    "respawn": 20.3,
+    "elite": true
+   },
+   {
+    "x": 3100,
+    "y": 3600,
+    "max_alive": 5,
+    "levels": [
+     40
+    ],
+    "respawn": 229.7,
+    "elite": true
+   },
+   {
+    "x": 4928,
+    "y": 4749,
+    "max_alive": 4,
+    "levels": [
+     40
+    ],
+    "respawn": 581.4,
+    "elite": true
+   },
+   {
+    "x": 5797,
+    "y": 4039,
+    "max_alive": 4,
+    "levels": [
+     40
+    ],
+    "respawn": 11.3,
+    "elite": true
+   },
+   {
+    "x": 1438,
+    "y": 5005,
+    "max_alive": 3,
+    "levels": [
+     40
+    ],
+    "respawn": 215.2,
+    "elite": true
+   },
+   {
+    "x": 1954,
+    "y": 4194,
+    "max_alive": 3,
+    "levels": [
+     40
+    ],
+    "respawn": 62.7,
+    "elite": true
+   },
+   {
+    "x": 462,
+    "y": 5836,
+    "max_alive": 3,
+    "levels": [
+     40
+    ],
+    "respawn": 5.2,
+    "elite": true
+   },
+   {
+    "x": 487,
+    "y": 4433,
+    "max_alive": 5,
+    "levels": [
+     40
+    ],
+    "respawn": 13.3,
+    "elite": true
+   },
+   {
+    "x": 1034,
+    "y": 3403,
+    "max_alive": 6,
+    "levels": [
+     40
+    ],
+    "respawn": 179.5,
+    "elite": true
+   },
+   {
+    "x": 1228,
+    "y": 3051,
+    "max_alive": 6,
+    "levels": [
+     40
+    ],
+    "respawn": 179.5,
+    "elite": true
+   },
+   {
+    "x": 558,
+    "y": 2278,
+    "max_alive": 5,
+    "levels": [
+     50
+    ],
+    "respawn": 386.9,
+    "elite": true
+   },
+   {
+    "x": 2061,
+    "y": 2792,
+    "max_alive": 4,
+    "levels": [
+     50
+    ],
+    "respawn": 28.9,
+    "elite": true
+   },
+   {
+    "x": 1414,
+    "y": 3600,
+    "max_alive": 1,
+    "levels": [
+     40
+    ],
+    "respawn": 144.0,
+    "elite": false
+   },
+   {
+    "x": 3492,
+    "y": 2412,
+    "max_alive": 5,
+    "levels": [
+     50
+    ],
+    "respawn": 86.9,
+    "elite": false
+   },
+   {
+    "x": 2633,
+    "y": 3608,
+    "max_alive": 4,
+    "levels": [
+     40
+    ],
+    "respawn": 330.4,
+    "elite": false
+   },
+   {
+    "x": 5982,
+    "y": 5459,
+    "max_alive": 5,
+    "levels": [
+     40
+    ],
+    "respawn": 3.2,
+    "elite": false
+   },
+   {
+    "x": 5756,
+    "y": 3017,
+    "max_alive": 3,
+    "levels": [
+     50
+    ],
+    "respawn": null,
+    "elite": false
+   },
+   {
+    "x": 4740,
+    "y": 1792,
+    "max_alive": 3,
+    "levels": [
+     50
+    ],
+    "respawn": null,
+    "elite": false
+   },
+   {
+    "x": 3330,
+    "y": 1263,
+    "max_alive": 3,
+    "levels": [
+     50
+    ],
+    "respawn": 5.2,
+    "elite": true
+   },
+   {
+    "x": 4288,
+    "y": 691,
+    "max_alive": 5,
+    "levels": [
+     50
+    ],
+    "respawn": null,
+    "elite": true
+   },
+   {
+    "x": 5397,
+    "y": 530,
+    "max_alive": 6,
+    "levels": [
+     50
+    ],
+    "respawn": 242.7,
+    "elite": false
+   },
+   {
+    "x": 2226,
+    "y": 513,
+    "max_alive": 4,
+    "levels": [
+     50
+    ],
+    "respawn": null,
+    "elite": false
+   },
+   {
+    "x": 1455,
+    "y": 1187,
+    "max_alive": 5,
+    "levels": [
+     50
+    ],
+    "respawn": null,
+    "elite": true
+   },
+   {
+    "x": 5922,
+    "y": 1667,
+    "max_alive": 4,
+    "levels": [
+     50
+    ],
+    "respawn": 5.2,
+    "elite": false
+   },
+   {
+    "x": 1131,
+    "y": 2170,
+    "max_alive": 1,
+    "levels": [
+     50
+    ],
+    "respawn": null,
+    "elite": true
+   },
+   {
+    "x": 2202,
+    "y": 3674,
+    "max_alive": 3,
+    "levels": [
+     40
+    ],
+    "respawn": 81.1,
+    "elite": false
+   }
+  ]
+ }
+}

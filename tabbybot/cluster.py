@@ -180,6 +180,16 @@ class SiteMemory:
             self.explored = [int(v) for v in data.get("explored_maps", [])]
         except Exception:
             self.maps = {}
+        try:  # 內建的怪堆資料（已探索過的地圖），新裝的人不用再全圖探索
+            seed = json.loads((Path(__file__).with_name("cluster_sites_seed.json")).read_text("utf-8"))
+            for key, rows in (seed.get("maps") or {}).items():
+                if not self.maps.get(key):
+                    self.maps[key] = [dict(r) for r in rows]
+            for mid in seed.get("explored_maps") or []:
+                if int(mid) not in self.explored:
+                    self.explored.append(int(mid))
+        except Exception:
+            pass
 
     def sites(self, map_id: int) -> list[dict[str, Any]]:
         return self.maps.get(str(int(map_id)), [])
