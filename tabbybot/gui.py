@@ -1332,6 +1332,12 @@ def make_handler(app: GuiApp):
             safe = redact_mapping({k: v for k, v in body.items() if k not in {
                 "secret", "password", "confirm", "private_key", "mnemonic",
             }})
+            if path == "/api/wallet/preview":
+                from tabbybot.wallet import mnemonic_addresses
+                try:
+                    return {"ok": True, "addresses": mnemonic_addresses(str(body.get("secret") or ""))}
+                except Exception:
+                    return {"ok": True, "addresses": []}
             if path == "/api/setup":
                 address = app.setup(
                     str(body.get("secret") or ""),

@@ -63,6 +63,18 @@ def normalize_private_key(value: str) -> str:
     return key.lower()
 
 
+def mnemonic_addresses(value: str, count: int = 10) -> list[str]:
+    """Addresses of the first `count` sub-wallets of a mnemonic (empty if not a mnemonic)."""
+    words = value.strip().split()
+    if len(words) not in (12, 15, 18, 21, 24):
+        return []
+    phrase = " ".join(words).lower()
+    out = []
+    for i in range(count):
+        out.append(Account.from_key(normalize_private_key(phrase + " " + str(i + 1))).address)
+    return out
+
+
 def address_from_key(private_key: str) -> str:
     return Account.from_key(normalize_private_key(private_key)).address
 

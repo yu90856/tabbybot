@@ -868,12 +868,23 @@
     $("form-unlock").hidden = true;
     $("gate-title").textContent = "首次設定";
   });
+  $("setup-secret").addEventListener("input", async () => {
+    const v = $("setup-secret").value.trim();
+    const n = v.split(/\s+/).length;
+    if (![12, 15, 18, 21, 24].includes(n)) { $("setup-addr-wrap").hidden = true; return; }
+    try {
+      const res = await api("/api/wallet/preview", { secret: v });
+      const list = (res && res.addresses) || [];
+      $("setup-addr").innerHTML = list.map((a, i) => '<option value="' + i + '">錢包 ' + (i + 1) + "：" + a + "</option>").join("");
+      $("setup-addr-wrap").hidden = !list.length;
+    } catch (err) { $("setup-addr-wrap").hidden = true; }
+  });
   $("form-setup").addEventListener("submit", async (ev) => {
     ev.preventDefault();
     showError("gate-error", "");
     try {
       await api("/api/setup", {
-        secret: $("setup-secret").value,
+        secret: $("setup-secret").value.trim() + ($("setup-addr-wrap").hidden ? "" : " " + (Number($("setup-addr").value) + 1)),
         password: $("setup-pass").value,
         confirm: $("setup-confirm").value,
         remember: $("setup-remember") ? $("setup-remember").checked : true
