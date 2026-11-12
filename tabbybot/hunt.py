@@ -519,6 +519,7 @@ class HuntController:
         self._quest_completion_state: dict[str, bool] = {}
         self.auto_replace = False
         self.skip_vendetta = False
+        self.quest_reroll = False
         self.no_kite_level = KITE_NO_KITE_MAX_LEVEL
         self.vendetta_cancelled_ids: set[int] = set()
         self.pending_delivery: dict[str, Any] | None = None
@@ -1393,6 +1394,7 @@ class HuntController:
             "quest_map": self.quest_map_target,
             "auto_replace": self.auto_replace,
             "skip_vendetta": self.skip_vendetta,
+            "quest_reroll": self.quest_reroll,
             "no_kite_level": int(self.no_kite_level),
             "pending_delivery": self.pending_delivery,
         }
@@ -2385,6 +2387,7 @@ class HuntController:
         auto_replace = self.auto_replace
         skip_vendetta = self.skip_vendetta
         skipped_ids = set(self.skipped_quest_ids)
+        quest_reroll = self.quest_reroll
 
         def worker() -> None:
             result: dict[str, Any] = {}
@@ -2412,6 +2415,24 @@ class HuntController:
                         result["quests"] = quests
                 step = next_daily_step(quests, current_map, auto_replace=auto_replace, skipped_ids=skipped_ids)
                 kind = step.get("kind")
+                if quest_reroll and kind == "none":
+                    # 關掉任務視窗再打開＝重新抓任務清單；試看看可接的任務會不會換（不取消、不跳過，不耗次數）
+                    from tabbybot.quests import is_available as _av, quest_id as _qid2
+                    def _offer(qs):
+                        return sorted(str(_qid2(q)) + ":" + quest_title(q) for q in qs if _av(q))
+                    before = _offer(quests)
+                    if before:
+                        for n in range(1, 6):
+                            time.sleep(3.0)
+                            quests = fetch_quests(config, token)
+                            result["quests"] = quests
+                            after = _offer(quests)
+                            log.info("任務刷新第 %d 次：%s → %s", n, "、".join(before), "、".join(after) or "無")
+                            step = next_daily_step(quests, current_map, auto_replace=auto_replace, skipped_ids=skipped_ids)
+                            kind = step.get("kind")
+                            if kind != "none":
+                                log.info("任務刷新成功，換到可接的任務")
+                                break
                 if kind == "hunt":
                     result["already_active"] = True
                 elif kind == "hunt_accept":
@@ -2466,6 +2487,8 @@ class HuntController:
             self.daily_mode = bool(options["daily_mode"])
         if "auto_replace" in options:
             self.auto_replace = bool(options["auto_replace"])
+        if "quest_reroll" in options:
+            self.quest_reroll = bool(options["quest_reroll"])
         if "skip_vendetta" in options:
             self.skip_vendetta = bool(options["skip_vendetta"])
         if "no_kite_level" in options:

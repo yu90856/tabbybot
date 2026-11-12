@@ -201,6 +201,7 @@ class GuiApp:
             "quest_map_auto": True,
             "auto_replace": False,
             "skip_vendetta": False,
+            "quest_reroll": False,
             "no_kite_level": 30,
             "auto_farm": True,
             "farm_target_level": int(getattr(getattr(config, "farm", None), "target_level", DEFAULT_FARM_LEVEL) or DEFAULT_FARM_LEVEL),
@@ -542,7 +543,7 @@ class GuiApp:
             self._apply_quest_flags(controller)
 
     def update_quest_options(self, options: dict[str, Any]) -> None:
-        for key in ("auto_quest", "task_limited", "quest_map_auto", "auto_replace", "skip_vendetta", "auto_farm"):
+        for key in ("auto_quest", "task_limited", "quest_map_auto", "auto_replace", "skip_vendetta", "quest_reroll", "auto_farm"):
             if key in options:
                 self.quest_options[key] = bool(options[key])
         if "no_kite_level" in options:
@@ -613,6 +614,7 @@ class GuiApp:
             self.quest_options[key] = bool(options.get(key, True))
         self.quest_options["auto_replace"] = bool(options.get("auto_replace", False))
         self.quest_options["skip_vendetta"] = bool(options.get("skip_vendetta", False))
+        self.quest_options["quest_reroll"] = bool(options.get("quest_reroll", False))
         self.quest_options["auto_farm"] = bool(options.get("auto_farm", True))
         if "no_kite_level" in options:
             try:
@@ -1014,7 +1016,7 @@ class GuiApp:
         quest = self._saved_settings.get("quest") if isinstance(getattr(self, "_saved_settings", None), dict) else None
         if not isinstance(quest, dict):
             return
-        for key in ("auto_quest", "task_limited", "quest_map_auto", "auto_replace", "skip_vendetta", "auto_farm"):
+        for key in ("auto_quest", "task_limited", "quest_map_auto", "auto_replace", "skip_vendetta", "quest_reroll", "auto_farm"):
             if key in quest:
                 self.quest_options[key] = bool(quest[key])
         if "no_kite_level" in quest:
@@ -1224,6 +1226,7 @@ class GuiApp:
                 "quest_map_auto": self.quest_options["quest_map_auto"] if controller is None else bool(controller.quest_map_auto),
                 "auto_replace": self.quest_options["auto_replace"] if controller is None else bool(controller.auto_replace),
                 "skip_vendetta": self.quest_options.get("skip_vendetta", False) if controller is None else bool(controller.skip_vendetta),
+                "quest_reroll": self.quest_options.get("quest_reroll", False) if controller is None else bool(getattr(controller, "quest_reroll", False)),
                 "no_kite_level": self.quest_options.get("no_kite_level", 30) if controller is None else int(getattr(controller, "no_kite_level", 30)),
                 "auto_farm": self.quest_options.get("auto_farm", True) if controller is None else bool(controller.auto_farm),
                 "farm_target_level": self.quest_options.get("farm_target_level", DEFAULT_FARM_LEVEL) if controller is None else int(controller.farm_target_level),
