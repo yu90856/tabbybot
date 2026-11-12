@@ -222,6 +222,9 @@ class StuckWatchdog:
         if login_error:
             reason = "登入失敗或會話已失效（LoginError）"
             style = "hard"
+        elif hunting and _questing(controller) and now - hit_at <= 60.0:
+            # 解任務中且仍在打怪：經驗少是正常的，不觸發沒經驗重登。
+            self._exp_at = now
         elif hunting and now - (now if self._exp_at is None else self._exp_at) >= self.no_exp_sec:
             mins = int((now - self._exp_at) // 60)
             reason = f"{mins} 分鐘經驗沒有增加"
@@ -421,3 +424,7 @@ def _chasing_hit_elite(controller) -> bool:
         return int(mon.get("health", 0)) > 0 and bool(controller.is_elite(mon))
     except Exception:
         return False
+
+
+def _questing(controller: Any) -> bool:
+    return bool(getattr(controller, "quest_map_quest_id", 0) or getattr(controller, "quest_map_target", None))
