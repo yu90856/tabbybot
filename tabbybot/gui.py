@@ -401,6 +401,33 @@ class GuiApp:
         self.hunt_error = ""
         log.info("繼續打怪（未重新登入）。")
 
+    def _schedule_auto_restart(self, options: dict[str, Any]) -> None:
+        """程式意外出錯停掉時自動重開：30／60／120 秒後重試，一小時最多 3 次。"""
+        now = time.time()
+        hist = [t for t in getattr(self, "_auto_restarts", []) if now - t < 3600]
+        if len(hist) >= 3:
+            log.error("一小時內已自動重開 3 次，不再自動重開，請檢查紀錄。")
+            self._auto_restarts = hist
+            return
+        delay = (30, 60, 120)[len(hist)]
+        hist.append(now)
+        self._auto_restarts = hist
+        stop_evt = self._hunt_stop
+        log.warning("打怪意外停止，%d 秒後自動重開（一小時內第 %d 次）。", delay, len(hist))
+
+        def later() -> None:
+            time.sleep(delay)
+            if (stop_evt.is_set() or self.hunt_running or self._hunt_stop is not stop_evt
+                    or getattr(self, "_user_stop_at", 0.0) >= now):
+                return
+            try:
+                self.start_hunt(dict(options))
+                log.info("已自動重開打怪。")
+            except Exception:
+                log.exception("自動重開失敗")
+
+        threading.Thread(target=later, daemon=True, name="tabbybot-auto-restart").start()
+
     def start_hunt(self, options: dict[str, Any]) -> None:
         if self._session_alive():
             self._resume_hunt(options)
@@ -440,6 +467,7 @@ class GuiApp:
                 loop.call_soon_threadsafe(stop.set)
 
             threading.Thread(target=watch, daemon=True).start()
+            crashed = False
             try:
                 with self.lock:
                     cached_token = self.game_token
@@ -468,11 +496,14 @@ class GuiApp:
                         pass
                 else:
                     self.hunt_error = f"{type(exc).__name__}: {exc}"
-                    log.error("打怪結束：%s", type(exc).__name__)
+                    log.exception("打怪結束：%s（完整錯誤如下）", type(exc).__name__)
+                    crashed = True
             finally:
                 self.hunt_running = False
                 self._holder.pop("controller", None)
                 loop.close()
+                if crashed and not self._hunt_stop.is_set():
+                    self._schedule_auto_restart(options)
 
         self._hunt_thread = threading.Thread(target=worker, daemon=True, name="tabbybot-hunt")
         self._hunt_thread.start()
@@ -495,6 +526,7 @@ class GuiApp:
 
     def stop_hunt(self, immediate: bool = False) -> None:
         """Soft-stop: keep the world session, finish the current target (unless immediate), then stand."""
+        self._user_stop_at = time.time()
         self.daily_running = False
         controller = self._holder.get("controller")
         if controller is not None and not self._hunt_stop.is_set() and (
