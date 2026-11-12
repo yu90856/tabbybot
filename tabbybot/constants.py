@@ -248,6 +248,10 @@ CLUSTER_ORBIT_STEP = 160.0       # arc length per orbit re-plan
 CLUSTER_FIRST_WAIT_SEC = 40.0    # wait this long for the first respawn sample
 CLUSTER_WAIT_MAX_SEC = 60.0      # don't wait for clusters slower than this
 CLUSTER_SITE_LOCK_SEC = 60.0
+EXPLORE_EVERY_SEC = 480.0      # 每 8 分鐘探索一次沒去過的區域
+EXPLORE_MAX_SEC = 180.0        # 單次探索最多走 3 分鐘
+EXPLORE_CELL = 500.0
+EXPLORE_FORGET_SEC = 1800.0    # 30 分鐘內去過的區域算已探索
 MAX_PULL_DEFAULT = 2
 MAX_PULL_CHOICES = (1, 2, 3, 4, 5)
 # Leash: monsters dragged too far from home reset (walk back, regen, take 0 damage).

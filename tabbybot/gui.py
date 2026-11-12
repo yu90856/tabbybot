@@ -80,6 +80,7 @@ class MemoryLogHandler(logging.Handler):
 COMBAT_DEFAULTS = {
     "elite_potion_min": 3,
     "potion_on_player_damage": False,
+    "no_potion": True,
     "prefer_elite": True,
     "elite_view_range": 700,
     "auto_potion": False,
@@ -124,7 +125,7 @@ def clean_combat_options(options: dict[str, Any], base: dict[str, Any]) -> dict[
         except (TypeError, ValueError) as exc:
             raise GuiError("同時最多拉幾隻必須是 1–5") from exc
         result["max_pull"] = 1
-    for key in ("potion_on_player_damage", "prefer_elite", "auto_potion", "cluster_kite", "kite_elite_only"):
+    for key in ("no_potion", "potion_on_player_damage", "prefer_elite", "auto_potion", "cluster_kite", "kite_elite_only"):
         if key in options:
             result[key] = bool(options[key])
     # Simplified UI (t626): no 越級 concept, one 「風箏」 toggle. Old saved values are migrated off.

@@ -159,3 +159,62 @@ class ClusterTracker:
             "alive": len(s.alive), "respawn": s.respawn_avg(), "samples": len(s.respawns),
             "current": s.id == current_id,
         } for s in self.sites]
+
+
+class SiteMemory:
+    """Permanent 怪堆 records (~/.tabbybot/cluster_sites.json): position, size, levels, respawn."""
+
+    MERGE_DIST = 400.0
+
+    def __init__(self, path: Any = None) -> None:
+        import json
+        from pathlib import Path
+        self.path = Path(path) if path else Path.home() / ".tabbybot" / "cluster_sites.json"
+        self.maps: dict[str, list[dict[str, Any]]] = {}
+        self.dirty = False
+        self.saved_at = 0.0
+        self.explored: list[int] = []
+        try:
+            data = json.loads(self.path.read_text("utf-8"))
+            self.maps = data.get("maps", {})
+            self.explored = [int(v) for v in data.get("explored_maps", [])]
+        except Exception:
+            self.maps = {}
+
+    def sites(self, map_id: int) -> list[dict[str, Any]]:
+        return self.maps.get(str(int(map_id)), [])
+
+    def observe(self, map_id: int, x: float, y: float, alive: int, levels: Iterable[int],
+                respawn: float | None, elite: bool = False) -> bool:
+        import time as _t
+        rows = self.maps.setdefault(str(int(map_id)), [])
+        best = min(rows, key=lambda r: math.hypot(r["x"] - x, r["y"] - y), default=None)
+        stamp = _t.strftime("%Y-%m-%d %H:%M")
+        new = False
+        if best is None or math.hypot(best["x"] - x, best["y"] - y) > self.MERGE_DIST:
+            best = {"x": round(x), "y": round(y), "max_alive": 0, "levels": [], "respawn": None,
+                    "elite": False, "first_seen": stamp, "seen": 0}
+            rows.append(best)
+            new = True
+        best["seen"] = int(best.get("seen", 0)) + 1
+        best["max_alive"] = max(int(best.get("max_alive", 0)), int(alive))
+        best["levels"] = sorted(set(best.get("levels", [])) | {int(v) for v in levels if v})
+        if respawn is not None:
+            best["respawn"] = round(float(respawn), 1)
+        best["elite"] = bool(best.get("elite")) or elite
+        best["last_seen"] = stamp
+        self.dirty = True
+        return new
+
+    def save(self, now: float, force: bool = False) -> None:
+        import json
+        if not self.dirty or (not force and now - self.saved_at < 30.0):
+            return
+        self.saved_at = now
+        self.dirty = False
+        try:
+            tmp = self.path.with_suffix(".tmp")
+            tmp.write_text(json.dumps({"explored_maps": self.explored, "maps": self.maps}, ensure_ascii=False, indent=1), "utf-8")
+            tmp.replace(self.path)
+        except Exception:
+            pass

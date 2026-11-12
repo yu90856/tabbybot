@@ -772,7 +772,7 @@
 
   function renderCombat(state) {
     const c = state.combat || {};
-    const map = { "opt-potion": "auto_potion", "opt-potion-pvp": "potion_on_player_damage",
+    const map = { "opt-no-potion": "no_potion", "opt-potion": "auto_potion", "opt-potion-pvp": "potion_on_player_damage",
       "opt-prefer-elite": "prefer_elite" };
     Object.keys(map).forEach((id) => {
       const el = $(id);
@@ -825,6 +825,7 @@
   async function saveCombat() {
     try {
       await api("/api/combat/options", {
+        no_potion: !!($("opt-no-potion") && $("opt-no-potion").checked),
         auto_potion: $("opt-potion").checked,
         potion_on_player_damage: $("opt-potion-pvp").checked,
         prefer_elite: $("opt-prefer-elite").checked,
@@ -937,7 +938,7 @@
     } catch (err) { toast(String(err.message || err)); }
   });
 
-  ["opt-potion", "opt-potion-pvp", "opt-prefer-elite"].forEach((id) => {
+  ["opt-no-potion", "opt-potion", "opt-potion-pvp", "opt-prefer-elite"].forEach((id) => {
     $(id).addEventListener("change", saveCombat);
   });
   $("elite-potion-min").addEventListener("change", saveCombat);

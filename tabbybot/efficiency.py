@@ -139,7 +139,7 @@ class EfficiencyTracker:
     def add_time(self, kind: str, secs: float) -> None:
         if secs <= 0 or secs > 5:
             return
-        if kind in {"travel", "portal"}:
+        if kind in {"travel", "portal", "explore"}:
             self.travel_secs += secs
         elif kind in {"idle", "wait", "patrol"}:
             self.idle_secs += secs

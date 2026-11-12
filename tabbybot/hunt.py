@@ -83,6 +83,10 @@ from tabbybot.constants import (
     CLUSTER_FIRST_WAIT_SEC,
     CLUSTER_ORBIT_STEP,
     CLUSTER_SITE_LOCK_SEC,
+    EXPLORE_CELL,
+    EXPLORE_EVERY_SEC,
+    EXPLORE_FORGET_SEC,
+    EXPLORE_MAX_SEC,
     CLUSTER_WAIT_MAX_SEC,
     KITE_LEASH_DEFAULT,
     KITE_LEASH_MIN,
@@ -407,6 +411,13 @@ class HuntController:
         self.chase_target: str | None = None
         self.patrol_route: list[tuple[float, float]] = []
         self.patrol_index = 0
+        self.explore_enabled = True
+        self.explore_route: list[tuple[float, float]] = []
+        self._explore_seen: dict[tuple[int, int, int], float] = {}
+        self._explore_next_at = time.monotonic() + 120.0
+        self._explore_started = 0.0
+        self._explore_last_at = 0.0
+        self._explore_known: list[tuple[float, float]] = []
         self.last_sync_at = 0.0
         self.claimed: set[str] = set()
         self.pending_travel: int | None = None
@@ -453,6 +464,11 @@ class HuntController:
         # Cluster orbit kiting (t621)
         from tabbybot.cluster import ClusterTracker
         self.clusters = ClusterTracker()
+        from tabbybot.cluster import SiteMemory
+        self.site_memory = SiteMemory()
+        self._site_memory_at = 0.0
+        self.explore_full = True  # 這次把整張圖探索完，看到的怪堆永久記錄
+        self._explore_next_at = time.monotonic() + 15.0
         self.cluster_kite = True
         self.max_pull = 1  # game only allows attacking one target at a time
         self.cluster_site_id: int | None = None
@@ -536,6 +552,7 @@ class HuntController:
         # Elite / potion settings (persisted by the GUI).
         self.elite_potion_min = ELITE_POTION_MIN_DEFAULT
         self.potion_on_player_damage = False
+        self.no_potion = True  # 禁止喝水：擋掉程式送出的所有生命藥水指令
         self.prefer_elite = True
         self.elite_view_range = float(ELITE_VIEW_RANGE)
         self.auto_potion = False  # t634: no auto potions while grinding; rest instead
@@ -652,6 +669,8 @@ class HuntController:
                 used = max(0, int(previous_potions) - int(current_potions))
                 if used:
                     self.potions += used
+                    log.warning("生命藥水少了 %s 瓶（剩 %s）；程式%s送喝水指令，HP %s/%s", used, current_potions,
+                                "未" if self.no_potion else "可能有", self.self_state.get("health"), self.self_state.get("maxHealth"))
         except (TypeError, ValueError):
             pass
         if "life" in self.self_state:
@@ -1322,6 +1341,7 @@ class HuntController:
             "combat_options": {
                 "elite_potion_min": self.elite_potion_min,
                 "potion_on_player_damage": self.potion_on_player_damage,
+                "no_potion": self.no_potion,
                 "prefer_elite": self.prefer_elite,
                 "elite_view_range": self.elite_view_range,
                 "auto_potion": self.auto_potion,
@@ -1424,7 +1444,24 @@ class HuntController:
             return []
         rows = []
         self.elite_note = ""
+        now_c = time.monotonic()
+        if not hasattr(self, "_contested_until"):
+            self._contested_until = {}
+        for site in getattr(self.clusters, "sites", ()):
+            try:
+                if self._site_contested(site):
+                    self._contested_until[site.id] = now_c + 90.0  # 看得到的堆有人打就整堆不碰
+            except Exception:
+                pass
+        mg = getattr(self, "_mem_goal", None)
+        here_c = (self.position.x, self.position.y)
+        travelling = bool(mg and mg[0] == self.position.map_id and now_c < mg[2]
+                          and math.dist(here_c, mg[1]) > 500)
         for encounter_id, monster in self.monsters.living_on_map(self.position.map_id):
+            if (travelling and not self.is_elite(monster) and encounter_id != self.attack_target
+                    and encounter_id not in self._own_hit_ids
+                    and monster_distance(self.position, monster) > 120):
+                continue  # 走去空怪堆的路上不打路邊單隻（精英例外）
             if self.tickets.is_invalid(encounter_id):
                 continue
             if not self.monster_allowed(monster):
@@ -1796,15 +1833,58 @@ class HuntController:
         )
         return packet
 
+    def _memory_site_path(self, map_id: int, here: tuple[float, float], now: float) -> list[tuple[float, float]] | None:
+        """Pick the best remembered 怪堆 of the farm level: bigger piles first, then distance."""
+        level = int(self.farm_target_level or 0)
+        contested = getattr(self, "_contested_until", {})
+        held = getattr(self, "_mem_goal", None)  # 選定的目的地走到為止（最多 120 秒），不要一直換
+        if held and held[0] == map_id and now < held[2] and math.dist(here, held[1]) > WAYPOINT_ARRIVE_PATROL * 2:
+            path = find_map_path(map_id, here, held[1]) if has_navigation(map_id) else [held[1]]
+            if path:
+                return list(path)
+        self._mem_goal = None
+        rows = []
+        for row in self.site_memory.sites(map_id):
+            levels = row.get("levels") or []
+            if level and level not in levels:
+                continue
+            pt = (float(row["x"]), float(row["y"]))
+            key = (map_id, round(pt[0]), round(pt[1]))
+            if now - self._spot_visits.get(key, -1e9) < SPOT_REVISIT_SEC:
+                continue
+            if math.dist(here, pt) <= WAYPOINT_ARRIVE_PATROL * 2:
+                continue
+            if any(math.dist(pt, (s.x, s.y)) < 400
+                   and now < max(self._site_lock.get(s.id, 0.0), contested.get(s.id, 0.0))
+                   for s in self.clusters.sites):
+                continue  # 剛放棄的堆（有人打／清空）先不回去
+            score = math.dist(here, pt) / (1.0 + min(int(row.get("max_alive", 1)), 10) / 3.0)
+            rows.append((score, pt, key, row))
+        if not rows:
+            return None
+        _score, goal, key, row = min(rows, key=lambda r: r[0])
+        self._spot_visits[key] = now
+        self._mem_goal = (map_id, goal, now + 120.0)
+        path = find_map_path(map_id, here, goal) if has_navigation(map_id) else [goal]
+        if not path:
+            return None
+        self.status = f"前往記錄中的怪堆（最多 {row.get('max_alive', '?')} 隻）"
+        log.info("前往記錄中的怪堆 (%.0f, %.0f)：最多 %s 隻，距離 %.0f", goal[0], goal[1],
+                 row.get("max_alive", "?"), math.dist(here, goal))
+        return list(path)
+
     def _patrol_to_spot(self, now: float) -> list[tuple[float, float]] | None:
         """Head to the nearest recorded spawn spot of the chosen level that we haven't checked lately."""
         if self.position is None or not self.auto_farm:
             return None
         map_id = self.position.map_id
+        here = (self.position.x, self.position.y)
+        mem = self._memory_site_path(map_id, here, now)
+        if mem:
+            return mem
         spots = self.level_store.spots_for(map_id, self.farm_target_level)
         if not spots:
             return None
-        here = (self.position.x, self.position.y)
         fresh = [s for s in spots if now - self._spot_visits.get((map_id, round(s[0]), round(s[1])), -1e9) >= SPOT_REVISIT_SEC
                  and math.dist(here, (s[0], s[1])) > WAYPOINT_ARRIVE_PATROL * 2]
         if not fresh:
@@ -2062,6 +2142,8 @@ class HuntController:
     def queue_user_packet(self, packet: dict[str, Any]) -> None:
         if not isinstance(packet, dict) or not packet.get("action"):
             raise ValueError("無效的操作")
+        if self.no_potion and packet.get("action") == "useHealthPotion":
+            raise RuntimeError("已開啟「禁止喝水」，不送出喝水指令。")
         self.user_packets.append(dict(packet))
 
     def pop_user_packets(self) -> list[dict[str, Any]]:
@@ -2476,6 +2558,9 @@ class HuntController:
             self.apply_hunt_anchor(self.position.map_id)
         self.check_overlevel_abort(now)
         candidates = self.candidates()
+        explore = self.plan_explore(candidates, now)
+        if explore is not None:
+            return explore
         if self.cluster_mode():
             action = self.plan_cluster(candidates, now)
             if action is not None:
@@ -2783,7 +2868,7 @@ class HuntController:
         return ("wait", None)
 
     def plan_auto_potion(self, now: float) -> dict[str, Any] | None:
-        if not self.auto_potion or not self.world_ready or self.is_dead:
+        if self.no_potion or not self.auto_potion or not self.world_ready or self.is_dead:
             return None
         try:
             hp = float(self.self_state.get("health", 0))
@@ -2879,6 +2964,8 @@ class HuntController:
                 pass
         if "potion_on_player_damage" in options:
             self.potion_on_player_damage = bool(options["potion_on_player_damage"])
+        if "no_potion" in options:
+            self.no_potion = bool(options["no_potion"])
         if "prefer_elite" in options:
             self.prefer_elite = bool(options["prefer_elite"])
         if "elite_view_range" in options:
@@ -3144,7 +3231,7 @@ class HuntController:
         offsets = (0.0, 0.3, -0.3, 0.6, -0.6, 0.9, -0.9, 1.2, -1.2, 1.57, -1.57, 2.0, -2.0, 2.5, -2.5)
         for off in offsets:
             ang = base + off
-            for dist in ((120.0, 160.0) if near_center else (need, KITE_RETREAT_STEP, 220.0, 160.0)):
+            for dist in ((160.0, 220.0) if near_center else (need, KITE_RETREAT_STEP, 220.0, 160.0)):
                 raw = (me[0] + math.cos(ang) * dist, me[1] + math.sin(ang) * dist)
                 goal = raw
                 if not self._point_walkable(goal):
@@ -3165,8 +3252,14 @@ class HuntController:
                 )
                 if near_center:  # normal mobs: orbit sideways around the pile instead of backing straight away
                     dc = math.dist(goal, near_center)
+                    if distance < KITE_SHOOT_MIN:
+                        # 被貼身：先把距離拉開（側後方），但不離開怪堆攻擊圈。
+                        score = (gap * 3.0 - 30.0 * max(0.0, dc - (KITE_SHOOT_MAX - 20.0))
+                                 - 15.0 * abs(off) + 0.1 * self.wall_distance(goal))
+                        candidates.append((score, goal))
+                        continue
                     score = (
-                        band * 800.0 - 3.0 * abs(gap - 180.0) - 30.0 * max(0.0, dc - 200.0)
+                        band * 800.0 - 3.0 * abs(gap - 250.0) - 30.0 * max(0.0, dc - (KITE_SHOOT_MAX - 20.0))
                         - 80.0 * abs(abs(off) - 1.57) + 0.1 * self.wall_distance(goal)
                     )
                 candidates.append((score, goal))
@@ -3209,6 +3302,10 @@ class HuntController:
         self._kite_route = []
         self.kite_note = f"風箏中止：{reason}"
         log.info("%s", self.kite_note)
+        if "貼身" in reason:
+            # 拉不開就站著把它打死：放掉它只會被追著打、還打不到別隻。
+            self.attack_target = encounter_id
+            return
         if self.attack_target == encounter_id:
             self.attack_target = None
         self.tickets.lock_invalid(encounter_id, duration=60.0)
@@ -3220,12 +3317,34 @@ class HuntController:
         monster = self.monsters.monsters.get(encounter_id)
         if not monster:
             return None
+        mx, my = float(monster["x"]), float(monster["y"])
+        lr = getattr(self, "_leash_run", None)
+        if lr and lr["id"] == encounter_id:
+            # 脫仇恨：一直往外跑，等精英回頭（距離變大）或拉到 520 外，再回頭追打
+            far = lr.get("best", 0.0)
+            lr["best"] = max(far, distance)
+            if distance >= 520 or now > lr["until"] or (distance > 300 and distance < far - 40):
+                self._leash_run = None
+                self._kite_contacts = 0
+                log.info("精英脫仇恨（距離 %.0f），回頭追打", distance)
+                return None
+            px, py = self.position.x, self.position.y
+            d = math.hypot(px - mx, py - my) or 1.0
+            goal = (px + (px - mx) / d * 260, py + (py - my) / d * 260)
+            g2 = self._radial_retreat_goal((mx, my), distance, None)
+            packet = self._move_to(g2 or goal, now, threat=(mx, my), center=(mx, my))
+            if packet is not None:
+                self.kite_note = self.status = f"精英貼身，後撤脫仇恨（距離 {distance:.0f}）"
+                return packet
         if distance <= KITE_ABORT_CONTACT_DIST:
             self._kite_contacts += 1
             if self._kite_contacts >= KITE_ABORT_CONTACTS:
-                self.abort_kite(encounter_id, "精英一直貼身，拉不開距離")
+                if self.is_elite(monster):
+                    self._leash_run = {"id": encounter_id, "until": now + 8.0, "best": distance}
+                    log.info("精英貼身拉不開，先後撤脫仇恨再回頭打")
+                    return self.plan_kite_step(encounter_id, distance, now)
+                self.abort_kite(encounter_id, "怪一直貼身，拉不開距離")
                 return None
-        mx, my = float(monster["x"]), float(monster["y"])
         self._mark_retreat(distance, now)
         site = self.clusters.site(self.cluster_site_id) if not self.is_elite(monster) else None
         if self.is_elite(monster):
@@ -3577,6 +3696,19 @@ class HuntController:
             except (KeyError, TypeError, ValueError):
                 continue
         self.clusters.update(self.position.map_id, living, now, engaged=self._own_hit_ids)
+        if now - self._site_memory_at >= 5.0:
+            self._site_memory_at = now
+            mid = int(self.position.map_id)
+            for site in self.clusters.sites:
+                if not site.alive:
+                    continue
+                mons = [self.monsters.monsters.get(eid) or {} for eid in site.alive]
+                levels = [int(monster_level(m) or 0) for m in mons if m]
+                elite = any(self.is_elite(m) for m in mons if m)
+                if self.site_memory.observe(mid, site.x, site.y, len(site.alive), levels, site.respawn_avg(), elite):
+                    log.info("記下新怪堆：%s (%.0f, %.0f) %s 隻 Lv%s", MAP_NAMES.get(mid, mid), site.x, site.y,
+                             len(site.alive), "/".join(str(v) for v in sorted(set(levels)) if v) or "?")
+            self.site_memory.save(now)
 
     def _site_targets(self, site: Any, allowed: dict[str, tuple]) -> list[tuple]:
         return [allowed[eid] for eid in site.alive if eid in allowed]
@@ -3591,8 +3723,17 @@ class HuntController:
         return now - site.empty_since < limit
 
     def _in_locked_site(self, encounter_id: str) -> bool:
-        if encounter_id == self.attack_target:
+        if encounter_id == self.attack_target or encounter_id in self._own_hit_ids:
             return False
+        contested = getattr(self, "_contested_until", {})
+        mon0 = self.monsters.monsters.get(encounter_id) or {}
+        if self.is_elite(mon0):
+            return False  # 精英一律打
+        if contested:
+            now0 = time.monotonic()
+            for site in getattr(self.clusters, "sites", ()):
+                if now0 < contested.get(site.id, 0.0) and encounter_id in getattr(site, "alive", ()):
+                    return True  # 有人在打的堆：連滿血的也不搶
         mon = self.monsters.monsters.get(encounter_id) or {}
         try:
             if int(mon.get("health", 0)) >= int(mon.get("maxHealth", 1)):
@@ -3606,17 +3747,20 @@ class HuntController:
         return False
 
     def _site_contested(self, site: Any) -> bool:
-        """Another player is near this 怪堆's centre, or its mobs are being hit by someone else."""
+        """有 3 個以上其他玩家在這個怪堆才算搶（1–2 人一起打可以接受）。"""
         if self.position is None:
             return False
+        damaged = False
         for eid in getattr(site, "alive", ()):
             mon = self.monsters.monsters.get(eid) or {}
             try:
                 if eid not in self._own_hit_ids and int(mon.get("health", 0)) < int(mon.get("maxHealth", 0)):
-                    return True
+                    damaged = True
+                    break
             except (TypeError, ValueError):
                 pass
         radius = self.cluster_ring(site) + 150.0
+        count = 0
         for peer in self.peers.on_map(self.position.map_id):
             if peer.get("kind") != "player":
                 continue
@@ -3624,10 +3768,12 @@ class HuntController:
                 continue
             try:
                 if math.dist((site.x, site.y), (float(peer["x"]), float(peer["y"]))) <= radius:
-                    return True
+                    count += 1
             except (KeyError, TypeError, ValueError):
                 continue
-        return False
+        if damaged and count == 0:
+            count = 1
+        return count >= 3
 
     def pick_cluster(self, allowed: dict[str, tuple], now: float) -> Any:
         """Look at the 5 nearest 怪堆; prefer one nobody else is fighting, else join a busy one."""
@@ -3654,6 +3800,112 @@ class HuntController:
         ring = max(site.spread + KITE_MIN_DIST, KITE_MIN_DIST + 60.0)
         return min(ring, max(KITE_MIN_DIST + 40.0, self.kite_leash * 0.85),
                    attack_reach(self.character_class, "prepare") + site.spread - 20.0)
+
+    def _explore_cell(self, x: float, y: float) -> tuple[int, int, int]:
+        mid = int(self.position.map_id) if self.position is not None else 0
+        return (mid, int(x // EXPLORE_CELL), int(y // EXPLORE_CELL))
+
+    def _explore_seen_near(self, x: float, y: float, now: float) -> bool:
+        if self.explore_full:
+            now = min(now, 0.0)  # full sweep: anything visited this session counts
+        mid, cx, cy = self._explore_cell(x, y)
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                if now - self._explore_seen.get((mid, cx + dx, cy + dy), -1e9) < EXPLORE_FORGET_SEC:
+                    return True
+        return False
+
+    def _stop_explore(self, now: float, why: str = "") -> None:
+        if self.explore_route and why:
+            log.info("探索結束：%s", why)
+        self.explore_route = []
+        self._explore_next_at = now + (5.0 if self.explore_full else EXPLORE_EVERY_SEC)
+
+    def plan_explore(self, candidates: list, now: float) -> tuple[str, Any] | None:
+        """Every few minutes walk to the nearest unexplored part of the map to find new 怪堆."""
+        if self.position is None or not self.explore_enabled or self.is_dead or not self.auto_farm:
+            return None
+        me = (self.position.x, self.position.y)
+        self._explore_seen[self._explore_cell(*me)] = now
+        self.update_clusters(now)
+        if self.explore_full and int(self.position.map_id) in self.site_memory.explored:
+            self.explore_full = False
+        if not self.explore_full and not self.explore_route:
+            return None  # 只做一次全圖探索；之後照存下來的怪堆資料決定去哪打
+        busy = bool(self.attack_target and self.attack_target in self._own_hit_ids) or now - self.last_damage_at < 5.0
+        if not self.explore_route:
+            if busy or now < self._explore_next_at or self.movement_paused:
+                return None
+            mid = int(self.position.map_id)
+            nav = _NAV_CACHE.get(mid)
+            if nav is None:
+                from tabbybot.navigation import navigator_for
+                nav = _NAV_CACHE[mid] = navigator_for(mid)
+            if nav is None:
+                self._explore_next_at = now + EXPLORE_EVERY_SEC
+                return None
+            for site in self.clusters.sites:  # known piles count as explored
+                self._explore_seen.setdefault(self._explore_cell(site.x, site.y), now)
+            if not self.explore_full:
+                for row in self.site_memory.sites(mid):
+                    self._explore_seen.setdefault(self._explore_cell(row["x"], row["y"]), now)
+            points = [p for p in nav.sweep_points() if not self._explore_seen_near(p[0], p[1], now)]
+            if not points:
+                if self.explore_full:
+                    self.explore_full = False
+                    self.site_memory.explored.append(mid)
+                    self.site_memory.dirty = True
+                    self.site_memory.save(now, force=True)
+                    log.info("全圖探索完成：%s 共記下 %s 個怪堆", MAP_NAMES.get(mid, mid), len(self.site_memory.sites(mid)))
+                self._explore_next_at = now + EXPLORE_EVERY_SEC
+                return None
+            if self.explore_full:
+                log.info("全圖探索：還剩約 %s 個區域沒走過", len(points))
+            goal = min(points, key=lambda p: math.dist(me, p))
+            path = find_map_path(mid, me, goal)
+            if not path:
+                self._explore_seen[self._explore_cell(*goal)] = now
+                self._explore_next_at = now + 30.0
+                return None
+            self.explore_route = list(path)
+            self._explore_known = [(s.x, s.y) for s in self.clusters.sites]
+            self._explore_started = now
+            self._explore_last_at = now
+            self.attack_target = None
+            self.chase_target = None
+            self.cluster_site_id = None
+            log.info("探索：前往沒去過的區域 (%.0f, %.0f)，距離 %.0f", goal[0], goal[1], math.dist(me, goal))
+        if busy:
+            self._stop_explore(now, "被怪打或正在打，先打完")
+            return None
+        if now - self._explore_started > EXPLORE_MAX_SEC:
+            self._stop_explore(now, "走太久，回去打怪")
+            return None
+        for dist, eid, mon in candidates:
+            if dist > 600:
+                continue
+            try:
+                pt = (float(mon["x"]), float(mon["y"]))
+            except (KeyError, TypeError, ValueError):
+                continue
+            if self.is_elite(mon) and self.prefer_elite:
+                self._stop_explore(now, "看到精英，先打")
+                return None
+            if not self.explore_full and all(math.dist(pt, k) > 600.0 for k in self._explore_known):
+                self._stop_explore(now, f"找到新的怪堆 ({pt[0]:.0f}, {pt[1]:.0f})")
+                return None
+        dt = max(0.0, now - (self._explore_last_at or now))
+        self._explore_last_at = now
+        self.explore_route, packet = self._advance_route(
+            self.explore_route, WAYPOINT_ARRIVE_PATROL, dt=dt,
+            max_step=PATROL_MAX_STEP, speed_factor=PATROL_SPEED_FACTOR)
+        if not self.explore_route:
+            log.info("探索結束：到了，這區沒有新怪堆")
+            self._stop_explore(now)
+            return None
+        self.activity = "探索新區域"
+        self.status = "探索地圖沒去過的區域找新怪堆"
+        return ("explore", packet)
 
     def plan_cluster(self, candidates: list, now: float) -> tuple[str, Any] | None:
         """Archer cluster orbit: circle the 怪堆 at a safe radius, shoot the next one right after a kill,
@@ -3686,6 +3938,9 @@ class HuntController:
             self._contest_check_at = now
             if self._site_contested(site):
                 alt = self.pick_cluster(allowed, now)
+                if not hasattr(self, "_contested_until"):
+                    self._contested_until = {}
+                self._contested_until[site.id] = now + 90.0
                 if alt is not None and alt.id != site.id and not self._site_contested(alt):
                     log.info("這堆有其他玩家在打，換到沒人打的怪堆")
                     site = alt
@@ -3803,7 +4058,9 @@ class HuntController:
             # Straight radial retreat to ~260 — never orbit in melee (the gap never opens).
             self._mark_retreat(spacing_dist, now)
             threat_pt = threat or (float(monster["x"]), float(monster["y"]))
-            goal = self._radial_retreat_goal(threat_pt, spacing_dist)
+            # 普通怪：以怪堆中心為圓心側移繞圈，不直直後退；精英照舊拉開。
+            orbit_c = None if self.is_elite(monster) else center
+            goal = self._radial_retreat_goal(threat_pt, spacing_dist, orbit_c)
             packet = self._move_to(goal, now, threat=threat_pt) if goal is not None else None
             if packet is not None:
                 self.activity = "拉開距離"
@@ -4186,7 +4443,7 @@ async def run_hunt(
                             if idle:
                                 await session.send_game(idle)
                             await asyncio.sleep(COMBAT_TICK_SEC)
-                        elif kind in {"chase", "patrol", "travel", "portal", "manual", "rest"} and payload:
+                        elif kind in {"chase", "patrol", "explore", "travel", "portal", "manual", "rest"} and payload:
                             await session.send_game(payload)
                             await asyncio.sleep(MOVE_TICK_SEC)
                         else:

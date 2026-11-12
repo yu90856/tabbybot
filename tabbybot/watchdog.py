@@ -32,9 +32,9 @@ ALERTS_LOG = Path.home() / ".tabbybot" / "alerts.log"
 # Soft-stop / user-idle kinds are ignored. Travel still checks movement.
 HUNTING_KINDS = {
     "attack", "wait_ticket", "chase", "patrol", "resync",
-    "wait", "rest", "travel", "portal", "manual",
+    "wait", "rest", "travel", "portal", "manual", "explore",
 }
-MOVE_KINDS = {"travel", "portal", "manual"}
+MOVE_KINDS = {"travel", "portal", "manual", "explore"}
 
 
 def default_notify(title: str, message: str) -> None:
