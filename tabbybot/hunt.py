@@ -503,6 +503,7 @@ class HuntController:
         self._quest_completion_state: dict[str, bool] = {}
         self.auto_replace = False
         self.skip_vendetta = False
+        self.no_kite_level = KITE_NO_KITE_MAX_LEVEL
         self.vendetta_cancelled_ids: set[int] = set()
         self.pending_delivery: dict[str, Any] | None = None
         self.skipped_quest_ids: set[int] = set()
@@ -1372,6 +1373,7 @@ class HuntController:
             "quest_map": self.quest_map_target,
             "auto_replace": self.auto_replace,
             "skip_vendetta": self.skip_vendetta,
+            "no_kite_level": int(self.no_kite_level),
             "pending_delivery": self.pending_delivery,
         }
 
@@ -2384,6 +2386,11 @@ class HuntController:
             self.auto_replace = bool(options["auto_replace"])
         if "skip_vendetta" in options:
             self.skip_vendetta = bool(options["skip_vendetta"])
+        if "no_kite_level" in options:
+            try:
+                self.no_kite_level = max(0, min(200, int(options["no_kite_level"])))
+            except (TypeError, ValueError):
+                pass
         if "auto_farm" in options:
             self.auto_farm = bool(options["auto_farm"])
         if "farm_target_level" in options:
@@ -3173,7 +3180,7 @@ class HuntController:
         if self.kite_elite_only and not self.is_elite(monster):
             return False
         lv = monster_level(monster)
-        if not self.is_elite(monster) and lv is not None and lv <= KITE_NO_KITE_MAX_LEVEL:
+        if not self.is_elite(monster) and lv is not None and lv <= int(self.no_kite_level):
             return False  # low-level normal mobs: stand and shoot
         if encounter_id in self.kite_failed:
             return False

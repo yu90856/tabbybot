@@ -687,6 +687,9 @@
       if ($("opt-skip-vendetta") && document.activeElement !== $("opt-skip-vendetta")) {
         $("opt-skip-vendetta").checked = !!(state.options && state.options.skip_vendetta);
       }
+      if ($("no-kite-level") && document.activeElement !== $("no-kite-level") && state.options && state.options.no_kite_level != null) {
+        $("no-kite-level").value = String(state.options.no_kite_level);
+      }
       if ($("opt-auto-replace") && document.activeElement !== $("opt-auto-replace")) {
         $("opt-auto-replace").checked = !!(state.options && state.options.auto_replace);
       }
@@ -995,6 +998,7 @@
       quest_map_auto: $("opt-quest-map").checked,
       auto_replace: $("opt-auto-replace").checked,
       skip_vendetta: $("opt-skip-vendetta").checked,
+      no_kite_level: $("no-kite-level") ? Number($("no-kite-level").value) : 30,
       auto_farm: $("opt-auto-farm") ? $("opt-auto-farm").checked : true,
       farm_target_level: $("farm-level") ? Number($("farm-level").value || 30) : 30
     });
@@ -1015,6 +1019,8 @@
         quest_map_auto: $("opt-quest-map").checked,
         auto_replace: $("opt-auto-replace").checked,
         skip_vendetta: $("opt-skip-vendetta").checked,
+      no_kite_level: $("no-kite-level") ? Number($("no-kite-level").value) : 30,
+        no_kite_level: $("no-kite-level") ? Number($("no-kite-level").value) : 30,
         auto_farm: $("opt-auto-farm") ? $("opt-auto-farm").checked : true,
         farm_target_level: $("farm-level") ? Number($("farm-level").value || 30) : 30
       });
@@ -1048,7 +1054,7 @@
       await refresh();
     } catch (err) { toast(err.message); await refresh(); }
   });
-  ["opt-auto-quest", "opt-task-limited", "opt-quest-map", "opt-auto-replace", "opt-skip-vendetta", "opt-auto-farm", "farm-level"].forEach((id) => {
+  ["opt-auto-quest", "opt-task-limited", "opt-quest-map", "opt-auto-replace", "opt-skip-vendetta", "opt-auto-farm", "farm-level", "no-kite-level"].forEach((id) => {
     if ($(id)) $(id).addEventListener("change", async () => {
       try { await postQuestOptions(); } catch (err) { toast(err.message); }
     });
