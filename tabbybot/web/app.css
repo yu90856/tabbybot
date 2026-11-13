@@ -276,3 +276,4 @@ canvas#minimap { cursor: crosshair; }
 .gear-row { grid-template-columns: repeat(6, minmax(0, 92px)); }
 .bag-grid { grid-template-columns: repeat(auto-fill, minmax(56px, 64px)); }
 .legend .ring.cluster { border-color: rgba(255,207,90,0.85); width: 12px; height: 12px; }
+#update-bar[hidden] { display: none !important; }

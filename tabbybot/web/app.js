@@ -1168,6 +1168,45 @@
     if (ev.key === "Enter") { ev.preventDefault(); sendChat(); }
   });
 
+  // 自動檢查 GitHub 新版本，有就顯示更新按鈕
+  const updBar = document.getElementById("update-bar");
+  const updText = document.getElementById("update-text");
+  const updBtn = document.getElementById("update-btn");
+  let updSkip = "";
+  async function checkUpdate() {
+    try {
+      const d = await api("/api/update/check");
+      if (d.available && d.remote !== updSkip) {
+        updText.textContent = "有新版本可以更新（" + (d.local || "?") + " → " + d.remote + "）" + (d.message ? "：" + d.message : "");
+        updBar.hidden = false;
+        updBar.dataset.remote = d.remote;
+      } else {
+        updBar.hidden = true;
+      }
+    } catch (e) { /* 離線就不顯示 */ }
+  }
+  if (updBar) {
+    updBtn.addEventListener("click", async () => {
+      if (!confirm("要更新到最新版嗎？更新後程式會自動重開（打怪會中斷一下）。錢包和設定不會被動到。")) return;
+      updBtn.disabled = true;
+      updText.textContent = "更新中，請稍候…";
+      try {
+        await api("/api/update/apply", {});
+        updText.textContent = "更新完成，程式重開中，約 15 秒後自動重新整理…";
+        setTimeout(() => location.reload(), 15000);
+      } catch (e) {
+        updText.textContent = e.message;
+        updBtn.disabled = false;
+      }
+    });
+    document.getElementById("update-later").addEventListener("click", () => {
+      updSkip = updBar.dataset.remote || "";
+      updBar.hidden = true;
+    });
+    checkUpdate();
+    setInterval(checkUpdate, 30 * 60 * 1000);
+  }
+
   refresh();
   setInterval(refresh, 1500);
 })();

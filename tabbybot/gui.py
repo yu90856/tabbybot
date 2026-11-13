@@ -1365,6 +1365,10 @@ def make_handler(app: GuiApp):
             if path == "/api/state":
                 _send_json(self, 200, {"ok": True, **app.state()})
                 return
+            if path == "/api/update/check":
+                from tabbybot import updater
+                _send_json(self, 200, {"ok": True, **updater.check()})
+                return
             if path == "/api/navgrid":
                 from urllib.parse import parse_qs
                 try:
@@ -1408,6 +1412,14 @@ def make_handler(app: GuiApp):
             safe = redact_mapping({k: v for k, v in body.items() if k not in {
                 "secret", "password", "confirm", "private_key", "mnemonic",
             }})
+            if path == "/api/update/apply":
+                from tabbybot import updater
+                try:
+                    how = updater.apply()
+                except Exception as exc:
+                    raise GuiError(f"更新失敗：{exc}") from exc
+                updater.restart_later()
+                return {"ok": True, "how": how}
             if path == "/api/wallet/preview":
                 from tabbybot.wallet import mnemonic_addresses
                 try:
