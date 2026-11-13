@@ -4104,6 +4104,18 @@ class HuntController:
         if distance > reach:
             if self.movement_paused:
                 return ("wait", None)
+            # 沿怪堆圈靠近若 5 秒沒拉近 30，改用一般尋路追擊 15 秒（避免卡在圈邊原地抖、一直換目標）
+            pg = getattr(self, "_approach_prog", None)
+            if pg is None or pg["id"] != encounter_id:
+                pg = self._approach_prog = {"id": encounter_id, "best": distance, "at": now, "fb": 0.0}
+            elif distance < pg["best"] - 30.0:
+                pg["best"], pg["at"] = distance, now
+            elif now - pg["at"] > 5.0 and now >= pg["fb"]:
+                pg["fb"], pg["at"], pg["best"] = now + 15.0, now + 15.0, distance
+                log.info("沿怪堆靠近沒有進展，改用尋路追擊")
+            if now < pg["fb"]:
+                self.chase_target = encounter_id
+                return None
             # Approach on the ring, on the target's side, instead of walking into the pack.
             mx, my = float(monster["x"]), float(monster["y"])
             vx, vy = mx - center[0], my - center[1]
