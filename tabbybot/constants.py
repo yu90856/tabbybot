@@ -40,6 +40,8 @@ MAP_NAMES = {
     8: "黑石洞窟",
     9: "失落綠洲",
     10: "冰封洞穴",
+    12: "荒野深處",
+    13: "雪原高地",
 }
 
 # Button / header labels matching the published desktop client.
@@ -54,6 +56,8 @@ MAP_BUTTONS = {
     8: "黑石洞窟",
     9: "失落綠洲",
     10: "冰封洞穴",
+    12: "荒野深處",
+    13: "雪原高地",
 }
 MAP_TITLES = {
     1: "Vylo Town · 維洛鎮",
@@ -66,20 +70,24 @@ MAP_TITLES = {
     8: "Blackstone Cavern · 黑石洞窟",
     9: "Lost Oasis · 失落綠洲",
     10: "Frozen Cavern · 冰封洞穴",
+    12: "Wilds Depths · 荒野深處",
+    13: "Snow Plateau · 雪原高地",
 }
 
 # Adjacent portals reported by the public client. Maps 5 and 7 need special items.
 MAP_ROUTES = {
     1: (2, 4, 5, 6),
-    2: (1, 10),
+    2: (1, 10, 13),
     3: (6,),
-    4: (1, 9),
+    4: (1, 9, 12),
     5: (1,),
     6: (1, 3, 8),
     7: (1,),
     8: (6,),
     9: (4,),
     10: (2,),
+    12: (4,),
+    13: (2,),
 }
 
 SPECIAL_ENTRY_MAPS = frozenset({5, 7})
@@ -97,6 +105,8 @@ MAP_FILES = {
     4: "wilds_navigation.json",
     5: "wastes_navigation.json",
     6: "south_forest_navigation.json",
+    12: "depths_navigation.json",
+    13: "plateau_navigation.json",
 }
 
 PLAYER_CLEARANCE = 16
@@ -138,6 +148,8 @@ PORTAL_CENTERS = {
     (6, 8): (1376.0, 1888.0), (8, 6): (3232.0, 6240.0),
     (4, 9): (5088.0, -32.0), (9, 4): (3232.0, 6240.0),
     (2, 10): (96.0, 4704.0), (10, 2): (3232.0, 6240.0),
+    (4, 12): (7360.0, 6016.0), (12, 4): (4640.0, 5024.0),
+    (2, 13): (7488.0, 4544.0), (13, 2): (4332.0, 3736.0),
 }
 PORTAL_ARRIVE_DISTANCE = 1.0
 TRAVEL_SYNC_WAIT_SEC = 0.9
@@ -171,7 +183,7 @@ ATTACK_ERROR_TEXT = {
 }
 
 # Stuck watchdog (overnight self-heal)
-WATCHDOG_NO_EXP_SEC = 120.0          # EXP unchanged while hunting
+WATCHDOG_NO_EXP_SEC = 180.0          # EXP/kills unchanged while hunting (3 min)
 WATCHDOG_NO_ATTACK_SEC = 60.0        # moving near a mob with no shot and no EXP
 WATCHDOG_NO_MOVE_SEC = 120.0         # position unchanged, and not resting
 WATCHDOG_STALE_TARGET_SEC = 60.0     # same target, distance and HP frozen

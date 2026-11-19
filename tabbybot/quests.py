@@ -210,6 +210,276 @@ def pick_next_monster_quest(
     return candidates[0]
 
 
+KILL_100_TARGET = 100
+
+# Minimum wait between game relogins used to refresh the daily quest offer.
+QUEST_RELOGIN_MIN_SEC = 60.0
+
+
+def quest_target(quest: dict[str, Any]) -> int | None:
+    return _as_int(quest.get("target", quest.get("quantity", quest.get("requiredCount"))))
+
+
+def is_kill_100_quest(quest: dict[str, Any]) -> bool:
+    """True only for monster-kill quests that require exactly 100 kills."""
+    return is_monster_quest(quest) and quest_target(quest) == KILL_100_TARGET
+
+
+def is_active_kill_100_quest(quest: dict[str, Any]) -> bool:
+    return is_kill_100_quest(quest) and is_active_monster_quest(quest)
+
+
+def has_active_kill_100_quest(quests: list[dict[str, Any]]) -> bool:
+    return any(is_active_kill_100_quest(quest) for quest in quests)
+
+
+def pick_next_kill_100_quest(
+    quests: list[dict[str, Any]],
+    current_map: int | None = None,
+) -> dict[str, Any] | None:
+    """First available 'kill 100 monsters' quest. Prefers the current map."""
+    if has_active_kill_100_quest(quests):
+        return None
+    candidates = [
+        quest for quest in quests
+        if is_available(quest) and is_kill_100_quest(quest) and is_auto_eligible(quest)
+    ]
+    if not candidates:
+        return None
+    if current_map is not None:
+        candidates.sort(key=lambda quest: quest_map_id(quest) != current_map)
+    return candidates[0]
+
+
+def active_kill_100_target(quests: list[dict[str, Any]]) -> tuple[int | None, int]:
+    """Map and quest id for an in-progress 100-kill quest."""
+    active = [
+        quest for quest in quests
+        if is_active_kill_100_quest(quest) and quest_map_id(quest) is not None and skip_reason(quest) is None
+    ]
+    if not active:
+        return None, 0
+    chosen = active[0]
+    ident = quest_id(chosen) or 0
+    return quest_map_id(chosen), ident
+
+
+FAST_KILL_MAX_TARGET = 50  # strictly less than 50 kills
+
+
+def is_fast_kill_quest(quest: dict[str, Any]) -> bool:
+    """True for monster-kill quests whose required kill count is below 50."""
+    if not is_monster_quest(quest):
+        return False
+    target = quest_target(quest)
+    return target is not None and 0 < target < FAST_KILL_MAX_TARGET
+
+
+def is_active_fast_kill_quest(quest: dict[str, Any]) -> bool:
+    return is_fast_kill_quest(quest) and is_active_monster_quest(quest)
+
+
+def has_active_fast_kill_quest(quests: list[dict[str, Any]]) -> bool:
+    return any(is_active_fast_kill_quest(quest) for quest in quests)
+
+
+def has_active_auto_kill_quest(quests: list[dict[str, Any]]) -> bool:
+    """In-progress auto-handled kill quest: already-accepted <50 kill, or a 100-kill."""
+    return has_active_fast_kill_quest(quests) or has_active_kill_100_quest(quests)
+
+
+def pick_next_fast_kill_quest(
+    quests: list[dict[str, Any]],
+    current_map: int | None = None,
+) -> dict[str, Any] | None:
+    """First available monster-kill quest with target < 50. Smaller counts first, then current map."""
+    if has_active_auto_kill_quest(quests):
+        return None
+    candidates = [
+        quest for quest in quests
+        if is_available(quest) and is_fast_kill_quest(quest) and is_auto_eligible(quest)
+    ]
+    if not candidates:
+        return None
+
+    def sort_key(quest: dict[str, Any]) -> tuple[int, int]:
+        target = quest_target(quest) or 0
+        same = 0 if current_map is not None and quest_map_id(quest) == current_map else 1
+        return (target, same)
+
+    candidates.sort(key=sort_key)
+    return candidates[0]
+
+
+def pick_next_auto_kill_quest(
+    quests: list[dict[str, Any]],
+    current_map: int | None = None,
+    *,
+    fast: bool = False,
+) -> dict[str, Any] | None:
+    """If fast: prefer kill count < 50, else fall back to kill-100. If not fast: kill-100 only."""
+    if has_active_auto_kill_quest(quests):
+        return None
+    if fast:
+        chosen = pick_next_fast_kill_quest(quests, current_map)
+        if chosen is not None:
+            return chosen
+    return pick_next_kill_100_quest(quests, current_map)
+
+
+def active_auto_kill_target(quests: list[dict[str, Any]]) -> tuple[int | None, int]:
+    """Map and quest id for an in-progress auto kill quest. Prefers <50 over 100."""
+    active = [
+        quest for quest in quests
+        if is_active_fast_kill_quest(quest) and quest_map_id(quest) is not None and skip_reason(quest) is None
+    ]
+    if active:
+        active.sort(key=lambda quest: quest_target(quest) or 0)
+        chosen = active[0]
+        return quest_map_id(chosen), quest_id(chosen) or 0
+    return active_kill_100_target(quests)
+
+
+def _norm_key(key: object) -> str:
+    return str(key).replace("_", "").replace("-", "").casefold()
+
+
+# Field names that may carry today's completed-quest count or the daily cap.
+_QUOTA_COMPLETED_KEYS = {
+    "dailyquestscompleted", "dailyquestcompleted", "dailyquestcomplete",
+    "dailyquestscount", "dailyquestcount", "dailycompleted", "dailycomplete",
+    "dailydone", "dailyfinished", "dailyaccepted", "dailyacceptedcount",
+    "dailyused", "dailyusedcount", "dailyquestused", "dailyquestsused",
+    "dailyquestprogress", "dailyprogress", "dailyclaimed", "dailytaken",
+    "questscompletedtoday", "questcompletedtoday", "completedtoday",
+    "completedaily", "completeddailyquests", "completedquests",
+    "completedcount", "completecount", "questscompleted", "questcompleted",
+    "questsdone", "questdone", "finishedtoday", "acceptedtoday",
+    "questsacceptedtoday", "acceptedcount", "usedquestslots", "questused",
+    "questsusage", "questusage", "claimedtoday", "takencount", "takentoday",
+    "todaycompleted", "todaycomplete", "todayquestscompleted",
+    "todayquestcount", "todayaccepted", "todayused", "todayscompleted",
+    "questsused", "questslotsused", "slotsused", "usedslots",
+    "finisheddaily", "donecount", "donetoday", "progresscount",
+}
+_QUOTA_LIMIT_KEYS = {
+    "dailyquestlimit", "dailyquestmax", "dailyquestcap", "dailyquestquota",
+    "dailyquestsmax", "dailyqueststotal", "dailyquestslimit",
+    "dailylimit", "dailymax", "dailycap", "dailyquota", "dailymaximum",
+    "questdailylimit", "questdailymax", "questdailycap",
+    "questlimit", "questmax", "questcap", "questquota", "questmaximum",
+    "maxdailyquests", "maxdailyquest", "maxquests", "maxquestsperday",
+    "questsperday", "questdaylimit", "daylimit", "acceptlimit",
+    "dailyacceptlimit", "questacceptlimit", "dailytasklimit",
+    "tasklimit", "taskcap", "maxtasks", "dailytaskcap",
+    "todaylimit", "todaymax", "todaycap", "todayquota",
+    "slotsmax", "questslots", "maxslots", "totalslots", "slotlimit",
+}
+_QUOTA_SKIP_KEYS = {
+    "id", "questid", "progress", "target", "mapid", "map",
+    "rewardexperience", "rewardgold", "rewardpotions", "runnumber", "run",
+    "quantity", "requiredcount", "experience", "gold", "level", "health",
+    "maxhealth", "mana", "playeritemid", "itemid",
+}
+
+
+def _iter_mappings(value: object, path: str = "", depth: int = 0):
+    if depth > 5:
+        return
+    if isinstance(value, dict):
+        yield path, value
+        for key, child in value.items():
+            child_path = f"{path}.{key}" if path else str(key)
+            yield from _iter_mappings(child, child_path, depth + 1)
+    elif isinstance(value, list):
+        for index, item in enumerate(value[:8]):
+            yield from _iter_mappings(item, f"{path}[{index}]", depth + 1)
+
+
+def extract_quest_quota(payload: object) -> dict[str, Any]:
+    """Pull today's completed-quest count and daily cap from a quests/progression payload."""
+    completed: int | None = None
+    limit: int | None = None
+    completed_from = ""
+    limit_from = ""
+    if payload is None:
+        return {"completed": None, "limit": None, "completed_from": "", "limit_from": ""}
+
+    def consider(path: str, key: str, raw: object) -> None:
+        nonlocal completed, limit, completed_from, limit_from
+        nk = _norm_key(key)
+        if nk in _QUOTA_SKIP_KEYS:
+            return
+        if isinstance(raw, str) and "/" in raw.replace("／", "/"):
+            left, right = [part.strip() for part in raw.replace("／", "/").split("/", 1)]
+            a, b = _as_int(left), _as_int(right)
+            if (
+                a is not None and b is not None and 0 <= a <= b <= 1000
+                and any(token in nk for token in ("quest", "daily", "task", "today", "slot"))
+            ):
+                completed, limit = a, b
+                completed_from = limit_from = path or key
+            return
+        num = _as_int(raw)
+        if num is None or num < 0 or num > 1000:
+            return
+        path_n = _norm_key(path)
+        in_daily_context = any(token in path_n for token in ("daily", "quest", "task", "today", "slot"))
+        # Prefer explicit daily/today + quest/task names; also accept daily.limit / daily.accepted.
+        if nk in _QUOTA_LIMIT_KEYS or (
+            any(token in nk for token in ("limit", "cap", "quota", "max"))
+            and (any(token in nk for token in ("quest", "daily", "task", "today", "slot")) or in_daily_context)
+        ):
+            if limit is None or nk in _QUOTA_LIMIT_KEYS or (nk in {"limit", "cap", "quota", "max"} and in_daily_context):
+                limit = num
+                limit_from = path or key
+            return
+        if nk in _QUOTA_COMPLETED_KEYS or (
+            any(token in nk for token in ("complete", "completed", "done", "finished", "accepted", "used", "claimed", "taken"))
+            and (any(token in nk for token in ("quest", "daily", "task", "today", "slot")) or in_daily_context)
+        ):
+            if completed is None or nk in _QUOTA_COMPLETED_KEYS or (nk in {"accepted", "completed", "used", "done"} and in_daily_context):
+                completed = num
+                completed_from = path or key
+
+    for path, mapping in _iter_mappings(payload):
+        # Skip walking into individual quest rows' rewards, but still look at sibling board fields.
+        leaf = path.rsplit(".", 1)[-1] if path else ""
+        if _norm_key(leaf) in {"quests"} or leaf.endswith("]"):
+            # Still inspect the mapping itself in case a quest object wrongly carries board totals;
+            # only accept very explicit daily/limit keys.
+            for key, raw in mapping.items():
+                nk = _norm_key(key)
+                if nk in _QUOTA_LIMIT_KEYS or nk in _QUOTA_COMPLETED_KEYS:
+                    consider(f"{path}.{key}" if path else str(key), key, raw)
+            continue
+        for key, raw in mapping.items():
+            child_path = f"{path}.{key}" if path else str(key)
+            consider(child_path, key, raw)
+
+    return {
+        "completed": completed,
+        "limit": limit,
+        "completed_from": completed_from,
+        "limit_from": limit_from,
+    }
+
+
+def format_quest_quota(completed: int | None, limit: int | None) -> str:
+    # Game field is daily.accepted / daily.limit (accepted today vs daily cap).
+    if completed is not None and limit is not None:
+        return f"今日任務已領取 {completed}/{limit}"
+    if completed is not None:
+        return f"今日任務已領取 {completed} · 上限：遊戲資料未提供此欄位"
+    if limit is not None:
+        return f"今日任務上限 {limit} · 已領取數：遊戲資料未提供此欄位"
+    return "今日任務完成數/上限：遊戲資料未提供這些欄位"
+
+
+def quest_quota_reached(completed: int | None, limit: int | None) -> bool:
+    return completed is not None and limit is not None and limit >= 0 and completed >= limit
+
+
 def skipped_available(quests: list[dict[str, Any]]) -> list[tuple[dict[str, Any], str]]:
     rows = []
     for quest in quests:
@@ -299,18 +569,35 @@ def format_quest_rows(quests: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [format_quest_row(quest) for quest in quests]
 
 
-def quest_summary(quests: list[dict[str, Any]]) -> str:
+def quest_summary(
+    quests: list[dict[str, Any]],
+    *,
+    completed: int | None = None,
+    limit: int | None = None,
+    fast: bool = False,
+) -> str:
+    quota = format_quest_quota(completed, limit)
     if not quests:
-        return "尚未讀取任務。請先解鎖並按「重新整理任務」。"
+        return f"{quota}。尚未讀取任務清單。"
     total = len(quests)
-    done = sum(1 for quest in quests if is_completed(quest))
-    active = sum(1 for quest in quests if is_active_monster_quest(quest))
-    available = sum(1 for quest in quests if is_available(quest) and is_auto_eligible(quest))
-    skipped = len(skipped_available(quests))
+    active = sum(1 for quest in quests if is_active_kill_100_quest(quest))
+    available = sum(
+        1 for quest in quests
+        if is_available(quest) and is_kill_100_quest(quest) and is_auto_eligible(quest)
+    )
+    if fast:
+        active_fast = sum(1 for quest in quests if is_active_fast_kill_quest(quest))
+        available_fast = sum(
+            1 for quest in quests
+            if is_available(quest) and is_fast_kill_quest(quest) and is_auto_eligible(quest)
+        )
+        return (
+            f"{quota}。清單 {total} 條 · 進行中低於 50 隻 {active_fast} · 可接低於 50 隻 {available_fast}"
+            f" · 進行中的 100 隻任務 {active} · 可接打 100 隻 {available}"
+        )
     return (
-        f"今日任務 {total} 條 · 已完成 {done} · 進行中 {active}"
-        f" · 可自動接取 {available}"
-        + (f" · 已略過 {skipped}" if skipped else "")
+        f"{quota}。清單 {total} 條 · 進行中的 100 隻任務 {active}"
+        f" · 可接打 100 隻 {available}"
     )
 
 

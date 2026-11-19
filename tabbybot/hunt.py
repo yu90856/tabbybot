@@ -17,11 +17,11 @@ from tabbybot.client import (
     QuestLimitReached,
     RealtimeSession,
     accept_quest,
-    cancel_quest,
     claim_defeat,
-    fetch_quest_delivery,
+    fetch_quest_board,
     fetch_quests,
     fetch_player,
+    fetch_progression,
     player_class,
     player_has_character,
     signed_login,
@@ -125,22 +125,24 @@ from tabbybot.quests import (
     QUEST_ACCEPT_INTERVAL_SEC,
     QUEST_REFRESH_INTERVAL_SEC,
     QUEST_IDLE_RECHECK_SEC,
-    active_quest_target,
+    QUEST_RELOGIN_MIN_SEC,
+    active_auto_kill_target,
     extract_quests,
+    extract_quest_quota,
+    format_quest_quota,
     format_quest_rows,
+    has_active_auto_kill_quest,
     has_active_monster_quest,
     is_active_monster_quest,
     is_monster_quest,
     monster_matches_active_quest,
-    format_delivery_prompt,
-    next_daily_step,
-    pick_next_monster_quest,
+    pick_next_auto_kill_quest,
     quest_id,
     quest_map_id,
+    quest_quota_reached,
     quest_summary,
+    quest_target,
     quest_title,
-    skip_reason,
-    skipped_available,
 )
 from tabbybot.protocol import (
     MonsterCache,
@@ -367,6 +369,12 @@ def step_towards(
 
 REST_LOW_RATIO = 0.35            # start resting below this HP (must actually leave)
 REST_RESUME_RATIO = 0.80         # fight again at this HP (natural regen ~10/s)
+MAP12_REST_LOW_RATIO = 0.55      # 荒野深處：遠程侏儒會追打，提前撤退
+MAP12_REST_RESUME_RATIO = 0.90   # 荒野深處：回血到約 90% 再開打
+MAP12_REST_SAFE_DIST = 720.0     # 侏儒射程超過舊的 380，回血要再走遠
+MAP12_ELITE_PILE_RADIUS = 280.0  # 同一堆裡有精英就整堆不打
+MAP12_SAFE_ANCHOR = (4640.0, 5024.0)  # 入口落地點，撤退優先往這邊走
+MAP12_KITE_HOLD_DIST = 300.0     # 不要只拉開到 200，那還在侏儒射程內
 REST_SAFE_DIST = 380.0           # back away while a monster is this close
 REST_CORNERED_FAILS = 3          # only shoot while resting after this many failed retreats
 REST_HINT_COUNT = 3              # this many low-HP rests ...
@@ -486,6 +494,20 @@ class HuntController:
         self.stop_after_kill = False
         self.pinned_map: int | None = None
         self.kite_elite_only = False
+        self.kite_elites = False
+        self._official_auto_want = False
+        self._official_auto_failed = False
+        self._official_probe_i = 0
+        self._official_probe_at = 0.0
+        self._official_shape_on = None
+        self._official_shape_off = None
+        self._official_last_origin = None
+        self._official_need_send = True
+        self._official_retry_at = 0.0
+        self._official_last_send = 0.0
+        self._load_official_auto_shapes()
+        self._monster_styles = {}
+        self._load_monster_styles()
         self.auto_return = True
         self.last_rtt_ms = None
         self.activity = "待命"
@@ -508,6 +530,8 @@ class HuntController:
         self.quest_map_target: int | None = None
         self.quest_map_quest_id = 0
         self.quest_status = "尚未讀取任務"
+        self.quest_completed: int | None = None
+        self.quest_limit: int | None = None
         self.quest_accept_blocked_date = None
         self.quest_accept_inflight = False
         self.quest_accept_checked_at = 0.0
@@ -515,8 +539,17 @@ class HuntController:
         self.quest_refresh_inflight = False
         self._quests_dirty = False
         self._accept_result: dict[str, Any] | None = None
-        self._refresh_result: list[dict[str, Any]] | None = None
+        self._refresh_result: dict[str, Any] | list[dict[str, Any]] | None = None
         self._quest_completion_state: dict[str, bool] = {}
+        self._quest_quota_probe_at = 0.0
+        self.quest_relogin_requested = False
+        self._quest_relogin_at = 0.0
+        self._last_relogin_started_at = 0.0
+        self._world_ready_at = 0.0
+        self._stamina_percent: float | None = None
+        self._stamina_mode = ""
+        self.quest_priority = False
+        self.fast_quest = False
         self.auto_replace = False
         self.skip_vendetta = False
         self.quest_reroll = False
@@ -707,9 +740,18 @@ class HuntController:
             self.position = adopted
             self._note_accepted_position(time.monotonic())
             self._respawn_sent = False
+            self._respawn_sent_at = 0.0
             self.tickets.used.clear()
             self.tickets.busy_until_at = 0.0
             self.stop_routes()
+            self._kite_route = []
+            self.explore_route = []
+            self.resting = False
+            self._official_last_origin = None
+            self._official_need_send = True
+            self._official_probe_i = 0
+            self.status = "已復活，準備返回練功地圖"
+            log.info("已復活，將返回 %s", MAP_NAMES.get(int(getattr(self, "pinned_map", 0) or 0) or (self.position.map_id if self.position else 0), "原地圖"))
         self.monsters.apply_snapshot(packet, self.position.map_id if self.position else None)
         self.check_engaged_death(time.monotonic())
         self._check_regen()
@@ -724,8 +766,12 @@ class HuntController:
                 self.update_quests(quests)
         if not self.world_ready:
             self.world_ready = True
+            self._world_ready_at = time.monotonic()
             self.status = "世界已就緒"
             self._quests_dirty = True
+            self._official_last_origin = None
+            self._official_need_send = True
+            self._official_probe_i = 0
         if self.is_dead and not self._respawn_sent:
             self.status = "角色陣亡，準備復活"
 
@@ -903,7 +949,10 @@ class HuntController:
 
     @property
     def is_dead(self) -> bool:
-        return bool(self.self_state.get("dead"))
+        if self.self_state.get("dead") or self.self_state.get("isDead"):
+            return True
+        hp = self._hp_value()
+        return hp is not None and hp <= 0
 
     def stop_routes(self) -> None:
         self.chase_route = []
@@ -925,6 +974,10 @@ class HuntController:
         if self.travel_final_target != self.pinned_map:
             self._clear_travel()
         self.apply_hunt_anchor(int(map_id))
+        if int(map_id) in (12, 13):
+            self.farm_target_level = 60
+            self.prefer_elite = False
+            self.overlevel_kite = False
 
     def apply_hunt_anchor(self, map_id: int | None = None) -> None:
         """Use the recorded open pocket for this map, or clear it if none."""
@@ -1387,6 +1440,12 @@ class HuntController:
             "auto_return": self.auto_return,
             "quests": format_quest_rows(self.quests),
             "quest_status": self.quest_status,
+            "quest_completed": self.quest_completed,
+            "quest_limit": self.quest_limit,
+            "quest_quota": format_quest_quota(self.quest_completed, self.quest_limit),
+            "stamina_percent": self.stamina_percent(),
+            "quest_priority": bool(self.quest_priority),
+            "fast_quest": bool(self.fast_quest),
             "auto_quest": self.auto_quest,
             "task_limited": self.task_limited,
             "quest_map_auto": self.quest_map_auto,
@@ -1449,12 +1508,13 @@ class HuntController:
         now_c = time.monotonic()
         if not hasattr(self, "_contested_until"):
             self._contested_until = {}
-        for site in getattr(self.clusters, "sites", ()):
-            try:
-                if self._site_contested(site):
-                    self._contested_until[site.id] = now_c + 90.0  # 看得到的堆有人打就整堆不碰
-            except Exception:
-                pass
+        if not self._hunting_map12():
+            for site in getattr(self.clusters, "sites", ()):
+                try:
+                    if self._site_contested(site):
+                        self._contested_until[site.id] = now_c + 90.0  # 看得到的堆有人打就整堆不碰
+                except Exception:
+                    pass
         mg = getattr(self, "_mem_goal", None)
         here_c = (self.position.x, self.position.y)
         travelling = bool(mg and mg[0] == self.position.map_id and now_c < mg[2]
@@ -1469,6 +1529,8 @@ class HuntController:
             if not self.monster_allowed(monster):
                 continue
             if not self.elite_allowed(encounter_id, monster):
+                continue
+            if self._map12_monster_near_elite(monster):
                 continue
             if not self._monster_in_anchor(encounter_id, monster):
                 continue
@@ -1554,7 +1616,9 @@ class HuntController:
         else:
             target = "無目標"
         where = f"{map_name} ({pos.x:.0f},{pos.y:.0f})" if pos else "未定位"
-        return f"{where}  HP {hp_text}  {ticket}  {target}  擊殺 {self.kill_count()}  出手 {self.attacks_sent}  {self.status}"
+        regen = self._health_regen()
+        regen_text = f"  回血 {regen}" if regen is not None else ""
+        return f"{where}  HP {hp_text}{regen_text}  {ticket}  {target}  擊殺 {self.kill_count()}  出手 {self.attacks_sent}  {self.status}"
 
     def _clear_travel(self) -> None:
         self.pending_travel = None
@@ -1745,10 +1809,27 @@ class HuntController:
         return self.advance_travel(clock)
 
     def plan_respawn(self) -> dict[str, Any] | None:
-        if not self.is_dead or self._respawn_sent:
+        if not self.is_dead:
+            self._respawn_sent = False
+            return None
+        now = time.monotonic()
+        last = float(getattr(self, "_respawn_sent_at", 0.0) or 0.0)
+        if self._respawn_sent and now - last < 8.0:
+            self.stop_routes()
+            self._kite_route = []
+            self.explore_route = []
+            self.resting = False
+            self.status = "角色陣亡，等待復活"
             return None
         self._respawn_sent = True
+        self._respawn_sent_at = now
         self.stop_routes()
+        self._kite_route = []
+        self.explore_route = []
+        self.resting = False
+        self._clear_travel()
+        self.status = "角色陣亡，正在復活"
+        log.info("角色陣亡，送出復活並停止移動")
         return build_respawn()
 
     def _advance_route(
@@ -2052,19 +2133,132 @@ class HuntController:
                 self.quest_kills += value - before
             self._quest_progress[ident] = value
         self.quests = rows
-        self.quest_status = quest_summary(rows)
+        self.quest_status = quest_summary(rows, completed=self.quest_completed, limit=self.quest_limit, fast=bool(self.fast_quest))
         self.refresh_quest_map_target()
-        if request_next and self.auto_quest and not has_active_monster_quest(rows):
+        if request_next and self.auto_quest and not has_active_auto_kill_quest(rows) and not self.quota_reached() and not self.defer_quests_for_stamina():
             self._quests_dirty = True
+        if self.defer_quests_for_stamina():
+            self.note_stamina_priority()
+
+    def stamina_percent(self) -> float | None:
+        """Remaining fatigue/stamina as a 0–100 percentage, if the game has sent it."""
+        state = self.self_state if isinstance(self.self_state, dict) else {}
+        sources: list[dict[str, Any]] = [state]
+        farming = state.get("farming")
+        if isinstance(farming, dict):
+            sources.insert(0, farming)
+        for nested_key in ("progress", "progression"):
+            nested = state.get(nested_key)
+            if isinstance(nested, dict):
+                sources.append(nested)
+                inner = nested.get("farming")
+                if isinstance(inner, dict):
+                    sources.append(inner)
+        found: float | None = None
+        for src in sources:
+            for key in ("staminaPercent", "stamina", "fatiguePercent", "fatigue"):
+                raw = src.get(key)
+                if raw is None or isinstance(raw, bool):
+                    continue
+                try:
+                    found = float(str(raw).rstrip("%").strip())
+                except (TypeError, ValueError):
+                    continue
+                break
+            if found is not None:
+                break
+        if found is not None:
+            self._stamina_percent = found
+            return found
+        return self._stamina_percent
+
+    def stamina_available(self) -> bool:
+        """True while there is fatigue left to spend on training. Unknown counts as still available."""
+        pct = self.stamina_percent()
+        if pct is None:
+            return True
+        return pct > 0.0
+
+    def defer_quests_for_stamina(self) -> bool:
+        """True when stamina-first gating should block quest work. 任務優先 overrides this."""
+        if getattr(self, "quest_priority", False):
+            return False
+        return self.stamina_available()
+
+    def _auto_quest_missing_reason(self) -> str:
+        if getattr(self, "fast_quest", False):
+            return "目前沒有可接的低於 50 隻或打 100 隻怪任務"
+        return "目前沒有可接的打 100 隻怪任務"
+
+    def note_stamina_priority(self) -> None:
+        """Keep the console on the farm-first rule while stamina remains."""
+        if getattr(self, "quest_priority", False):
+            return
+        pct = self.stamina_percent()
+        quota = format_quest_quota(self.quest_completed, self.quest_limit)
+        if pct is None:
+            text = f"{quota}。先練功，耐力歸零後再解任務。"
+        else:
+            text = f"{quota}。耐力尚餘 {pct:.2f}%，先練功，歸零後再解任務。"
+        self.quest_status = text
+        if self._stamina_mode != "farm":
+            self._stamina_mode = "farm"
+            self.quest_relogin_requested = False
+            log.info("%s", text)
 
     def refresh_quest_map_target(self) -> None:
-        if not (self.quest_map_auto or self.quest_first):
+        if self.defer_quests_for_stamina() or not (self.auto_quest or self.quest_map_auto or self.quest_first or self.daily_mode):
             self.quest_map_target = None
             self.quest_map_quest_id = 0
             return
-        target, ident = active_quest_target(self.quests)
+        target, ident = active_auto_kill_target(self.quests)
         self.quest_map_target = target
         self.quest_map_quest_id = ident
+
+    def apply_quest_quota(self, quota: dict[str, Any] | None) -> None:
+        if not isinstance(quota, dict):
+            return
+        if quota.get("completed") is not None:
+            self.quest_completed = quota["completed"]
+        if quota.get("limit") is not None:
+            self.quest_limit = quota["limit"]
+        self.quest_status = quest_summary(self.quests, completed=self.quest_completed, limit=self.quest_limit, fast=bool(self.fast_quest))
+
+    def quota_reached(self) -> bool:
+        if self.quest_accept_blocked_date is not None and self.quest_accept_blocked_date == date.today():
+            return True
+        return quest_quota_reached(self.quest_completed, self.quest_limit)
+
+    def queue_quest_relogin(self, reason: str, now: float | None = None) -> None:
+        """Ask the hunt loop to relogin so the daily quest offer can refresh. Never cancels."""
+        if self.defer_quests_for_stamina():
+            self.quest_relogin_requested = False
+            self.note_stamina_priority()
+            return
+        if self.quota_reached():
+            self.quest_accept_blocked_date = date.today()
+            self.quest_status = (
+                f"{format_quest_quota(self.quest_completed, self.quest_limit)}。"
+                "已達每日上限，停止刷新，改回掛機。"
+            )
+            return
+        now = time.monotonic() if now is None else now
+        anchors = [stamp for stamp in (self._quest_relogin_at, self._last_relogin_started_at, self._world_ready_at) if stamp]
+        elapsed = now - max(anchors) if anchors else QUEST_RELOGIN_MIN_SEC
+        wait = QUEST_RELOGIN_MIN_SEC - elapsed
+        if wait > 0:
+            self.quest_status = (
+                f"{format_quest_quota(self.quest_completed, self.quest_limit)}。"
+                f"{reason}，{int(wait) + 1} 秒後再重登刷新（不取消、不耗次數）。"
+            )
+            return
+        self.quest_relogin_requested = True
+        self._quest_relogin_at = now
+        self.quest_status = (
+            f"{format_quest_quota(self.quest_completed, self.quest_limit)}。"
+            f"{reason}，正在重新登入以刷新任務列表（不取消、不耗次數）。"
+        )
+        log.info("%s", self.quest_status)
 
 
     def record_monster_levels(self) -> None:
@@ -2117,9 +2311,11 @@ class HuntController:
     def should_auto_farm(self) -> bool:
         if not self.auto_farm:
             return False
-        if has_active_monster_quest(self.quests):
+        if self.defer_quests_for_stamina():
+            return True
+        if has_active_auto_kill_quest(self.quests):
             return False
-        return bool(self.daily_mode or self.auto_quest or self.pending_delivery)
+        return bool(self.daily_mode or self.auto_quest or self.quota_reached())
 
     def farm_map(self) -> int:
         current = self.position.map_id if self.position else None
@@ -2256,6 +2452,19 @@ class HuntController:
         return "已送出。"
 
     def desired_map(self) -> tuple[int | None, int]:
+        if self.defer_quests_for_stamina():
+            self.quest_map_target = None
+            self.quest_map_quest_id = 0
+            if self.pinned_map is not None:
+                current = self.position.map_id if self.position else None
+                if current is not None and self.farm_hold_active() and current != self.pinned_map:
+                    return current, 0
+                return self.pinned_map, 0
+            if self.auto_farm:
+                return self.farm_map(), 0
+            if self.auto_return:
+                return self.hunt_map, 0
+            return None, 0
         self.refresh_quest_map_target()
         if (self.quest_map_auto or self.quest_first) and self.quest_map_target:
             return self.quest_map_target, int(self.quest_map_quest_id or 0)
@@ -2280,50 +2489,51 @@ class HuntController:
         refresh = self._refresh_result
         if refresh is not None:
             self._refresh_result = None
-            self.update_quests(refresh, request_next=True)
+            if isinstance(refresh, dict) and "quests" in refresh:
+                self.apply_quest_quota(refresh.get("quota"))
+                self.update_quests(refresh.get("quests") or [], request_next=True)
+            else:
+                self.update_quests(refresh, request_next=True)
         result = self._accept_result
         if result is None:
             return
         self._accept_result = None
         self.quest_accept_inflight = False
+        if result.get("quota"):
+            self.apply_quest_quota(result["quota"])
         if result.get("quests"):
             self.update_quests(result["quests"], request_next=False)
         if result.get("limit"):
             self.quest_accept_blocked_date = date.today()
             detail = result["limit"]
-            self.quest_status = "今日任務領取已滿。" + (f" 伺服器：{detail}" if detail else "")
+            self.quest_status = (
+                f"{format_quest_quota(self.quest_completed, self.quest_limit)}。"
+                "今日任務領取已滿，停止刷新，改回掛機。"
+                + (f" 伺服器：{detail}" if detail else "")
+            )
             log.info("%s", self.quest_status)
             return
         if result.get("error"):
             log.info("自動接取任務未完成：%s", result["error"])
             return
-        if result.get("delivery_prompt"):
-            self.pending_delivery = result["delivery_prompt"]
-            self.quest_status = f"「{self.pending_delivery.get('title', '任務')}」需要交付道具或裝備，已暫停等待你確認。"
-            self.status = self.quest_status
-            log.info("%s", self.quest_status)
-            return
-        if result.get("replaced"):
-            titles = "、".join(quest_title(row) for row in result["replaced"][:5])
-            log.info("已略過尚未接取的交付任務並改接打怪任務（遊戲沒有更換接口）：%s", titles)
         accepted = result.get("accepted")
         if accepted:
             self._quest_idle_date = None
-            log.info("已自動接取打怪任務：%s（%s）", quest_title(accepted), MAP_NAMES.get(quest_map_id(accepted) or 0, quest_map_id(accepted) or "未指定地圖"))
+            needed = quest_target(accepted)
+            kind = f"打 {needed} 隻怪" if needed is not None else "打怪"
+            log.info(
+                "已自動接取%s任務：%s（%s）",
+                kind,
+                quest_title(accepted),
+                MAP_NAMES.get(quest_map_id(accepted) or 0, quest_map_id(accepted) or "未指定地圖"),
+            )
             self.refresh_quest_map_target()
             return
-        if result.get("replaced_done") or result.get("none"):
-            if result.get("replaced_done") or result.get("replaced"):
-                self.quest_status = "打怪任務已處理完；已略過尚未接取的交付任務（遊戲沒有更換或放棄接口）。"
-            else:
-                self.quest_status = "今日沒有可自動接取的打怪任務了。"
-            today = date.today()
-            self._quest_idle_date = today
-            self._quest_idle_at = time.monotonic()
-            if self._quest_idle_logged != today:
-                self._quest_idle_logged = today
-                log.info("%s 改直接打 練功等級 Lv%s；之後每 15 分鐘或換日再查一次任務。",
-                         self.quest_status, self.farm_target_level)
+        if result.get("need_relogin"):
+            self.queue_quest_relogin(self._auto_quest_missing_reason())
+            return
+        if result.get("already_active"):
+            self.refresh_quest_map_target()
 
     def quest_idle(self, now: float) -> bool:
         """True while today's quests are exhausted and the 15-minute re-check isn't due yet."""
@@ -2335,6 +2545,9 @@ class HuntController:
         return now - self._quest_idle_at < QUEST_IDLE_RECHECK_SEC
 
     def maybe_refresh_quests(self, now: float) -> None:
+        if self.defer_quests_for_stamina():
+            self.note_stamina_priority()
+            return
         if self.quest_refresh_inflight or not self._claim_token:
             return
         interval = QUEST_IDLE_RECHECK_SEC if self.quest_idle(now) else QUEST_REFRESH_INTERVAL_SEC
@@ -2349,7 +2562,26 @@ class HuntController:
 
         def worker() -> None:
             try:
-                self._refresh_result = fetch_quests(config, token)
+                board = fetch_quest_board(config, token)
+                quota = board.get("quota") or {}
+                # If the quests payload has no cap/count, try /progression occasionally.
+                if (quota.get("completed") is None or quota.get("limit") is None) and (
+                    time.monotonic() - self._quest_quota_probe_at >= 300.0
+                ):
+                    self._quest_quota_probe_at = time.monotonic()
+                    try:
+                        extra = extract_quest_quota(fetch_progression(config, token))
+                        merged = dict(quota)
+                        if merged.get("completed") is None:
+                            merged["completed"] = extra.get("completed")
+                            merged["completed_from"] = extra.get("completed_from")
+                        if merged.get("limit") is None:
+                            merged["limit"] = extra.get("limit")
+                            merged["limit_from"] = extra.get("limit_from")
+                        quota = merged
+                    except Exception as exc:
+                        log.info("讀取進度以補任務上限失敗：%s：%s", type(exc).__name__, exc)
+                self._refresh_result = {"quests": board.get("quests") or [], "quota": quota}
             except Exception as exc:
                 log.info("重新整理任務失敗：%s：%s", type(exc).__name__, exc)
                 # Don't hammer the quest API (or treat this as a session failure).
@@ -2360,114 +2592,79 @@ class HuntController:
         threading.Thread(target=worker, daemon=True, name="tabbybot-quests").start()
 
     def maybe_accept_quest(self, now: float) -> None:
+        if self.defer_quests_for_stamina():
+            self.quest_relogin_requested = False
+            self.note_stamina_priority()
+            return
+        if self._stamina_mode != "quest":
+            self._stamina_mode = "quest"
+            kind = "低於 50 隻或打 100 隻怪" if self.fast_quest else "打 100 隻怪"
+            if self.stamina_available():
+                log.info("任務優先已開啟，先解%s任務。", kind)
+            else:
+                log.info("耐力已用完，開始解%s任務。", kind)
         if not self.auto_quest or not self.world_ready or not self._claim_token:
             return
         today = date.today()
         if self.quest_accept_blocked_date is not None and self.quest_accept_blocked_date != today:
             self.quest_accept_blocked_date = None
-        if self.quest_accept_blocked_date == today:
+        if self.quest_accept_blocked_date == today or self.quota_reached():
             return
+        # Delivery prompts are no longer part of auto-quest; never let them block a 100-kill run.
         if self.pending_delivery:
-            pend = self.pending_delivery
-            if not (self.skip_vendetta and str(pend.get("objective_type") or "").upper() == "VENDETTA"):
-                return
             self.pending_delivery = None
-            self.quest_accept_checked_at = 0.0
-        if has_active_monster_quest(self.quests):
+        if has_active_auto_kill_quest(self.quests):
             return
-        if self.quest_idle(now):
+        if self.quest_relogin_requested:
             return
         if self.quest_accept_inflight or now - self.quest_accept_checked_at < QUEST_ACCEPT_INTERVAL_SEC:
             return
+        # If we already know the current offer is not an auto-handled kill quest, queue a relogin
+        # without another API call when the minimum interval has not elapsed.
+        if self.quests and pick_next_auto_kill_quest(self.quests, fast=bool(self.fast_quest)) is None and not has_active_auto_kill_quest(self.quests):
+            if self._quest_relogin_at and now - self._quest_relogin_at < QUEST_RELOGIN_MIN_SEC:
+                self.queue_quest_relogin(self._auto_quest_missing_reason(), now)
+                return
         self.quest_accept_inflight = True
         self.quest_accept_checked_at = now
         token = self._claim_token
         config = self.config
         current_map = self.position.map_id if self.position else None
-        auto_replace = self.auto_replace
-        skip_vendetta = self.skip_vendetta
-        skipped_ids = set(self.skipped_quest_ids)
-        quest_reroll = self.quest_reroll
+        fast_mode = bool(self.fast_quest)
 
         def worker() -> None:
             result: dict[str, Any] = {}
             try:
-                quests = fetch_quests(config, token)
+                board = fetch_quest_board(config, token)
+                quests = board.get("quests") or []
                 result["quests"] = quests
-                if skip_vendetta:
-                    from tabbybot.quests import objective_type as _ot, quest_id as _qid, is_completed
-                    _cancelled = False
-                    for _q in quests:
-                        if str(_ot(_q) or "").upper() == "VENDETTA" and _qid(_q) is not None:
-                            skipped_ids.add(int(_qid(_q)))
-                            self.skipped_quest_ids.add(int(_qid(_q)))
-                            if _q.get("accepted") and not is_completed(_q) and int(_qid(_q)) not in self.vendetta_cancelled_ids:
-                                try:
-                                    cancel_quest(config, token, int(_qid(_q)))
-                                    self.vendetta_cancelled_ids.add(int(_qid(_q)))
-                                    _cancelled = True
-                                    log.info("已自動取消已接的仇殺任務：%s", quest_title(_q))
-                                except QuestError as exc:
-                                    self.vendetta_cancelled_ids.add(int(_qid(_q)))
-                                    log.info("自動取消仇殺任務失敗：%s", exc)
-                    if _cancelled:
-                        quests = fetch_quests(config, token)
-                        result["quests"] = quests
-                step = next_daily_step(quests, current_map, auto_replace=auto_replace, skipped_ids=skipped_ids)
-                kind = step.get("kind")
-                if quest_reroll and kind == "none":
-                    # 關掉任務視窗再打開＝重新抓任務清單；試看看可接的任務會不會換（不取消、不跳過，不耗次數）
-                    from tabbybot.quests import is_available as _av, quest_id as _qid2
-                    def _offer(qs):
-                        return sorted(str(_qid2(q)) + ":" + quest_title(q) for q in qs if _av(q))
-                    before = _offer(quests)
-                    if before:
-                        for n in range(1, 6):
-                            time.sleep(3.0)
-                            quests = fetch_quests(config, token)
-                            result["quests"] = quests
-                            after = _offer(quests)
-                            log.info("任務刷新第 %d 次：%s → %s", n, "、".join(before), "、".join(after) or "無")
-                            step = next_daily_step(quests, current_map, auto_replace=auto_replace, skipped_ids=skipped_ids)
-                            kind = step.get("kind")
-                            if kind != "none":
-                                log.info("任務刷新成功，換到可接的任務")
-                                break
-                if kind == "hunt":
+                result["quota"] = board.get("quota")
+                if has_active_auto_kill_quest(quests):
                     result["already_active"] = True
-                elif kind == "hunt_accept":
-                    chosen = step["quest"]
-                    ident = quest_id(chosen)
-                    if ident is None:
-                        result["error"] = "任務沒有編號"
-                    else:
+                else:
+                    chosen = pick_next_auto_kill_quest(quests, current_map, fast=bool(fast_mode))
+                    ident = quest_id(chosen) if chosen else None
+                    if chosen is not None and ident is not None:
                         accepted = accept_quest(config, token, ident)
                         result["accepted"] = chosen
-                        result["replaced"] = step.get("replaced") or []
                         refreshed = extract_quests(accepted)
+                        if isinstance(accepted, dict):
+                            extra = extract_quest_quota(accepted)
+                            if extra.get("completed") is not None or extra.get("limit") is not None:
+                                merged = dict(result.get("quota") or {})
+                                if merged.get("completed") is None:
+                                    merged["completed"] = extra.get("completed")
+                                if merged.get("limit") is None:
+                                    merged["limit"] = extra.get("limit")
+                                result["quota"] = merged
                         result["quests"] = refreshed or fetch_quests(config, token)
-                elif kind == "delivery":
-                    quest = step["quest"]
-                    preview = None
-                    error = ""
-                    ident = quest_id(quest)
-                    if ident is not None:
-                        try:
-                            preview = fetch_quest_delivery(config, token, ident)
-                        except QuestError as exc:
-                            error = str(exc)
-                    result["delivery_prompt"] = format_delivery_prompt(
-                        quest,
-                        preview=preview,
-                        already_accepted=bool(step.get("already_accepted")),
-                        error=error if preview is None else "",
-                    )
-                elif kind == "replaced_done":
-                    result["replaced_done"] = True
-                    result["replaced"] = step.get("replaced") or []
-                else:
-                    result["none"] = True
-                    result["skipped"] = skipped_available(quests)
+                    elif quest_quota_reached(
+                        (result.get("quota") or {}).get("completed"),
+                        (result.get("quota") or {}).get("limit"),
+                    ):
+                        result["limit"] = "今日任務已達上限"
+                    else:
+                        result["need_relogin"] = True
             except QuestLimitReached as exc:
                 result["limit"] = str(exc)
             except (QuestError, Exception) as exc:
@@ -2476,7 +2673,12 @@ class HuntController:
 
         threading.Thread(target=worker, daemon=True, name="tabbybot-quest-accept").start()
 
+
     def apply_quest_options(self, options: dict[str, Any]) -> None:
+        if "quest_priority" in options:
+            self.quest_priority = bool(options["quest_priority"])
+        if "fast_quest" in options:
+            self.fast_quest = bool(options["fast_quest"])
         if "auto_quest" in options:
             self.auto_quest = bool(options["auto_quest"])
         if "task_limited" in options:
@@ -2491,6 +2693,10 @@ class HuntController:
             self.quest_reroll = bool(options["quest_reroll"])
         if "skip_vendetta" in options:
             self.skip_vendetta = bool(options["skip_vendetta"])
+        # 自動任務只接打 100 隻：不用取消、重骰或跳過（會耗每日次數）。
+        self.quest_reroll = False
+        self.auto_replace = False
+        self.skip_vendetta = False
         if "no_kite_level" in options:
             try:
                 self.no_kite_level = max(0, min(200, int(options["no_kite_level"])))
@@ -2504,7 +2710,9 @@ class HuntController:
             except (TypeError, ValueError):
                 level = DEFAULT_FARM_LEVEL
             self.farm_target_level = max(1, min(9999, level))
-        # 關掉自動任務與任務地圖時，也不要再「任務優先」跑去任務地圖
+        # 自動接 100 隻任務時一律前往任務地圖；關掉自動任務後不再繞去舊任務圖。
+        if self.auto_quest or self.daily_mode:
+            self.quest_map_auto = True
         self.quest_first = bool(self.auto_quest or self.quest_map_auto or self.daily_mode)
         if self.auto_quest or self.daily_mode:
             self._quests_dirty = True
@@ -2513,6 +2721,7 @@ class HuntController:
     def next_combat_action(self, now: float) -> tuple[str, Any]:
         if not self.world_ready or self.position is None or self.is_dead:
             return ("idle", None)
+        self._note_official_result()
         self.apply_quest_results()
         self.maybe_refresh_quests(now)
         self.maybe_accept_quest(now)
@@ -2576,9 +2785,17 @@ class HuntController:
             return ("idle", None)
         if not self.auto_combat:
             return ("idle", None)
+        self._apply_map12_rules()
+        if self._map12_elite_in_range():
+            self._map12_leave_elite_pile(now)
         rest = self.plan_rest(now)
         if rest is not None:
+            # 回血時若官方自動掛機能開，順便吃 +5。
+            self._tick_official_auto(now, want_on=True, allow_probe=True)
             return rest
+        official = self._tick_official_auto(now, want_on=True, allow_probe=True)
+        if official is not None:
+            return official
         if self.position is not None:
             self.apply_hunt_anchor(self.position.map_id)
         self.check_overlevel_abort(now)
@@ -2791,6 +3008,13 @@ class HuntController:
             lost = self._last_hp - hp
             self.last_damage_source = self.classify_damage_source(now)
             self.last_damage_at = now
+            if self.position is not None:
+                for _eid, mon in self.monsters.living_on_map(self.position.map_id):
+                    try:
+                        d = math.dist((self.position.x, self.position.y), (float(mon["x"]), float(mon["y"])))
+                    except (KeyError, TypeError, ValueError):
+                        continue
+                    self.observe_monster_attack_range(mon, d)
             self.hits_taken += 1
             self._dmg_taken_events.append((now, float(lost)))
             self._trim_rate(self._dmg_taken_events, now)
@@ -2821,7 +3045,7 @@ class HuntController:
         if ratio is None or self.position is None:
             return None
         if not self.resting:
-            if ratio >= REST_LOW_RATIO:
+            if ratio >= self._rest_low_ratio():
                 return None
             self.resting = True
             self._rest_started = now
@@ -2834,22 +3058,23 @@ class HuntController:
             self._kite_route = []
             self._low_hp_events = [t for t in self._low_hp_events if now - t < REST_HINT_WINDOW_SEC] + [now]
             self.combat_event("生命過低，撤退回血", None)
-            log.info("生命 %d%%，先撤退等自然回血到 %d%% 再打（不喝水）", int(ratio * 100), int(REST_RESUME_RATIO * 100))
+            log.info("生命 %d%%，先撤退等自然回血到 %d%% 再打（不喝水）", int(ratio * 100), int(self._rest_resume_ratio() * 100))
             if len(self._low_hp_events) >= REST_HINT_COUNT and now - self._rest_hint_at > REST_HINT_WINDOW_SEC:
                 self._rest_hint_at = now
                 log.info("建議：%d 分鐘內已經 %d 次血量過低，Lv%s 可能太難，考慮把「練功等級」調低一級。",
                          int(REST_HINT_WINDOW_SEC // 60), len(self._low_hp_events), self.farm_target_level)
-        elif ratio >= REST_RESUME_RATIO:
+        elif ratio >= self._rest_resume_ratio():
             self.resting = False
             self.combat_event("回血完成，繼續打", None)
             log.info("生命回到 %d%%（休息 %d 秒），繼續打怪", int(ratio * 100), int(now - self._rest_started))
             return None
         me = (self.position.x, self.position.y)
-        self.status = f"回血中（{int(ratio * 100)}% → {int(REST_RESUME_RATIO * 100)}%）"
+        self.status = f"回血中（{int(ratio * 100)}% → {int(self._rest_resume_ratio() * 100)}%）"
         self.activity = "撤退回血"
         self.attack_target = None
         self.chase_target = None
         self.chase_route = []
+        safe = self._rest_safe_dist()
         threats = []
         close = []
         for _eid, monster in self.monsters.living_on_map(self.position.map_id):
@@ -2858,7 +3083,7 @@ class HuntController:
             except (KeyError, TypeError, ValueError):
                 continue
             d = math.dist(me, pos)
-            if d <= REST_SAFE_DIST:
+            if d <= safe:
                 threats.append(pos)
             if d <= 120.0:
                 close.append(pos)
@@ -2871,12 +3096,19 @@ class HuntController:
         cy = sum(p[1] for p in threats) / len(threats)
         dx, dy = me[0] - cx, me[1] - cy
         norm = math.hypot(dx, dy) or 1.0
-        candidates = [(me[0] + dx / norm * REST_SAFE_DIST, me[1] + dy / norm * REST_SAFE_DIST)]
+        candidates = [(me[0] + dx / norm * safe, me[1] + dy / norm * safe)]
         # Try sides and slightly shorter steps before giving up.
         for sign in (1.0, -1.0):
-            candidates.append((me[0] - dy / norm * REST_SAFE_DIST * sign, me[1] + dx / norm * REST_SAFE_DIST * sign))
-        for dist in (300.0, 220.0, 180.0, 120.0, 80.0):
-            candidates.append((me[0] + dx / norm * dist, me[1] + dy / norm * dist))
+            candidates.append((me[0] - dy / norm * safe * sign, me[1] + dx / norm * safe * sign))
+        if self._hunting_map12():
+            # 遠程侏儒：短步仍在射程內；優先往入口空地退，不要退到地圖邊緣卡牆。
+            ax, ay = MAP12_SAFE_ANCHOR
+            candidates.insert(0, (ax, ay))
+            for dist in (safe, 500.0, 400.0):
+                candidates.append((me[0] + dx / norm * dist, me[1] + dy / norm * dist))
+        else:
+            for dist in (300.0, 220.0, 180.0, 120.0, 80.0):
+                candidates.append((me[0] + dx / norm * dist, me[1] + dy / norm * dist))
         packet = None
         for goal in candidates:
             packet = self._move_to(goal, now)
@@ -2961,9 +3193,322 @@ class HuntController:
             name = str(weapon.get("name") or weapon.get("itemName") or weapon.get("code") or "")
         return "BOW" in name.upper()
 
+
+    def _health_regen(self) -> int | None:
+        stats = self.self_state.get("characterStats")
+        try:
+            if isinstance(stats, dict) and stats.get("healthRegen") is not None:
+                return int(stats["healthRegen"])
+            if self.self_state.get("healthRegen") is not None:
+                return int(self.self_state["healthRegen"])
+        except (TypeError, ValueError):
+            return None
+        return None
+
+    def _official_auto_on(self) -> bool:
+        regen = self._health_regen()
+        return regen is not None and regen >= 13
+
+    def _styles_path(self):
+        from pathlib import Path
+        return Path.home() / ".tabbybot" / "monster_styles.json"
+
+    def _official_path(self):
+        from pathlib import Path
+        return Path.home() / ".tabbybot" / "official_auto.json"
+
+    def _load_monster_styles(self) -> None:
+        import json
+        defaults = {"侏儒": "ranged", "gnome": "ranged", "熊貓": "melee", "熊猫": "melee", "panda": "melee"}
+        data = dict(defaults)
+        try:
+            raw = json.loads(self._styles_path().read_text("utf-8"))
+            if isinstance(raw, dict):
+                data.update({str(k): ("ranged" if v in ("ranged", "遠程", "range") else "melee") for k, v in raw.items()})
+        except (OSError, ValueError):
+            pass
+        self._monster_styles = data
+
+    def _save_monster_styles(self) -> None:
+        import json
+        try:
+            path = self._styles_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(self._monster_styles, ensure_ascii=False, indent=2), "utf-8")
+        except OSError:
+            pass
+
+    def _load_official_auto_shapes(self) -> None:
+        import json
+        try:
+            raw = json.loads(self._official_path().read_text("utf-8"))
+        except (OSError, ValueError):
+            raw = {}
+        if isinstance(raw, dict):
+            self._official_shape_on = raw.get("on_shape")
+            self._official_shape_off = raw.get("off_shape")
+            if raw.get("failed"):
+                self._official_auto_failed = True
+
+    def _save_official_auto_shapes(self) -> None:
+        import json
+        try:
+            path = self._official_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({
+                "on_shape": self._official_shape_on,
+                "off_shape": self._official_shape_off,
+                "failed": bool(self._official_auto_failed),
+            }, ensure_ascii=False), "utf-8")
+        except OSError:
+            pass
+
+    def monster_style_name(self, monster: dict[str, Any]) -> str:
+        name = str(monster.get("name") or monster.get("monsterName") or monster.get("type") or "").strip()
+        return name or "?"
+
+    def monster_is_ranged(self, monster: dict[str, Any]) -> bool:
+        """Classify a monster as ranged or melee. Known types + observed damage distance + optional fields."""
+        for key in ("attackRange", "range", "projectile", "isRanged", "ranged"):
+            if key in monster:
+                val = monster[key]
+                if isinstance(val, bool):
+                    return val
+                try:
+                    if float(val) > 160:
+                        return True
+                except (TypeError, ValueError):
+                    if str(val).lower() in {"1", "true", "ranged", "projectile"}:
+                        return True
+        name = self.monster_style_name(monster)
+        style = self._monster_styles.get(name) or self._monster_styles.get(name.lower())
+        return style == "ranged"
+
+    def observe_monster_attack_range(self, monster: dict[str, Any], distance: float) -> None:
+        """If we take a hit from far away, record that species as ranged."""
+        name = self.monster_style_name(monster)
+        if not name or name == "?":
+            return
+        current = self._monster_styles.get(name)
+        if distance >= 200 and current != "ranged":
+            self._monster_styles[name] = "ranged"
+            self._save_monster_styles()
+            log.info("記下 %s 是遠程（挨打距離 %.0f）", name, distance)
+        elif current is None and distance < 120:
+            self._monster_styles[name] = "melee"
+            self._save_monster_styles()
+
+    def _official_auto_packet(self, want_on: bool) -> dict[str, Any]:
+        # Official web client (main.gd toggle_auto_combat -> pvp_client.send_auto_combat_settings).
+        # WS JSON: action=autoCombat, autoCombat=bool, autoOriginX/Y=float, autoRadius=384.0;
+        # send_packet also attaches seq and life.
+        x = float(self.position.x) if self.position is not None else 0.0
+        y = float(self.position.y) if self.position is not None else 0.0
+        return {
+            "action": "autoCombat",
+            "autoCombat": bool(want_on),
+            "autoOriginX": x,
+            "autoOriginY": y,
+            "autoRadius": 384.0,
+        }
+
+    def _official_probe_shapes(self, want_on: bool) -> list[dict[str, Any]]:
+        # Do not send {action:autoCombat, enabled:...}. Missing autoCombat is treated as off
+        # and previously dropped healthRegen 13→8.
+        return [self._official_auto_packet(want_on)]
+
+    def _tick_official_auto(self, now: float, *, want_on: bool, allow_probe: bool) -> tuple[str, Any] | None:
+        """Enable/disable official auto-combat buff. Combat targeting stays with us."""
+        if not self.auto_combat or self.position is None or self.is_dead:
+            return None
+        if self.travel_phase is not None:
+            return None
+        on = self._official_auto_on()
+        if on and want_on:
+            if self.kite_elites and self._elite_for_kite_nearby() and not self.resting:
+                return None
+            # Already have +5; only refresh origin if we walked out of the 384 radius.
+            origin = getattr(self, "_official_last_origin", None)
+            if origin is not None:
+                dist = math.dist((self.position.x, self.position.y), origin)
+                if dist > 280.0:
+                    self._official_need_send = True
+                    return self._send_official_auto(now, want_on=True, allow_probe=True)
+            return None
+        if on and not want_on:
+            return self._send_official_auto(now, want_on=False)
+        if not want_on:
+            return None
+        if self.kite_elites and self._elite_for_kite_nearby() and not self.resting:
+            return None
+        if self._official_auto_failed and now < float(getattr(self, "_official_retry_at", 0.0) or 0.0):
+            return None
+        nearby = False
+        try:
+            rows = self.candidates()
+            nearby = bool(rows) and rows[0][0] <= 420
+        except Exception:
+            nearby = False
+        if not nearby and not self.resting and not getattr(self, "_official_need_send", False):
+            return None
+        if not nearby and not self.resting:
+            return None
+        return self._send_official_auto(now, want_on=True, allow_probe=allow_probe)
+
+    def _elite_for_kite_nearby(self) -> bool:
+        if not self.kite_elites or self.position is None:
+            return False
+        reach = float(self.elite_view_range or 700)
+        me = (self.position.x, self.position.y)
+        for _eid, mon in self.monsters.living_on_map(self.position.map_id):
+            if not self.is_elite(mon):
+                continue
+            try:
+                if math.dist(me, (float(mon["x"]), float(mon["y"]))) <= reach:
+                    return True
+            except (KeyError, TypeError, ValueError):
+                continue
+        return False
+
+    def _send_official_auto(self, now: float, *, want_on: bool, allow_probe: bool = True) -> tuple[str, Any] | None:
+        if now - self._official_last_send < 1.8:
+            self.status = "正在切換官方自動掛機…"
+            return ("wait", None)
+        shapes = self._official_probe_shapes(want_on)
+        if not allow_probe and not (self._official_shape_on if want_on else self._official_shape_off):
+            return None
+        idx = self._official_probe_i if want_on else 0
+        if idx >= len(shapes):
+            if want_on and not self._official_auto_on():
+                self._official_auto_failed = True
+                self._official_retry_at = now + 90.0
+                self._official_need_send = False
+                self._save_official_auto_shapes()
+                log.info("官方自動掛機無法開啟（healthRegen 仍是 %s），改為原地打怪", self._health_regen())
+            self._official_probe_i = 0
+            return None
+        pkt = dict(shapes[idx])
+        before = self._health_regen()
+        try:
+            self.queue_user_packet(pkt)
+        except Exception:
+            log.info("無法送出官方自動掛機指令")
+            return None
+        self._official_last_send = now
+        self._official_probe_i = idx + 1
+        self._official_probe_at = now
+        if self.position is not None:
+            self._official_last_origin = (float(self.position.x), float(self.position.y))
+        log.info("嘗試官方自動掛機 %s：%s（目前回血 %s）", "開" if want_on else "關", pkt, before)
+        self.status = "正在切換官方自動掛機…"
+        self._official_pending = (want_on, before, pkt, now)
+        return ("wait", None)
+
+    def _note_official_result(self) -> None:
+        pending = getattr(self, "_official_pending", None)
+        if not pending:
+            return
+        want_on, before, pkt, sent_at = pending
+        if time.monotonic() - sent_at < 1.2:
+            return
+        after = self._health_regen()
+        self._official_pending = None
+        if want_on and after is not None and after >= 13 and (before is None or before < 13):
+            self._official_shape_on = {"action": "autoCombat", "autoCombat": True, "autoRadius": 384.0}
+            self._official_auto_failed = False
+            self._official_need_send = False
+            self._official_probe_i = 0
+            self._save_official_auto_shapes()
+            log.info("官方自動掛機已開啟：%s（回血 %s→%s）", pkt, before, after)
+        elif want_on and after is not None and after >= 13:
+            self._official_need_send = False
+            self._official_auto_failed = False
+        elif (not want_on) and after is not None and after <= 8 and (before is None or before >= 13):
+            self._official_shape_off = {"action": "autoCombat", "autoCombat": False, "autoRadius": 384.0}
+            self._official_probe_i = 0
+            self._save_official_auto_shapes()
+            log.info("官方自動掛機已關閉：%s（回血 %s→%s）", pkt, before, after)
+
+    def _hunting_map12(self) -> bool:
+        mid = int(self.position.map_id) if self.position is not None else int(getattr(self, "pinned_map", 0) or 0)
+        return mid == 12
+
+    def _apply_map12_rules(self) -> None:
+        """Lv60 荒野深處：自己選怪、避開精英、不跟人搶堆。"""
+        if int(getattr(self, "pinned_map", 0) or 0) != 12 and not self._hunting_map12():
+            return
+        self.farm_target_level = 60
+        self.prefer_elite = False
+        self.overlevel_kite = False
+        self.explore_full = False
+
+    def _rest_low_ratio(self) -> float:
+        return MAP12_REST_LOW_RATIO if self._hunting_map12() else REST_LOW_RATIO
+
+    def _rest_resume_ratio(self) -> float:
+        return MAP12_REST_RESUME_RATIO if self._hunting_map12() else REST_RESUME_RATIO
+
+    def _rest_safe_dist(self) -> float:
+        return MAP12_REST_SAFE_DIST if self._hunting_map12() else REST_SAFE_DIST
+
+    def _kite_hold_dist(self) -> float:
+        return MAP12_KITE_HOLD_DIST if self._hunting_map12() else KITE_HOLD_DIST
+
+    def _map12_monster_near_elite(self, monster: dict[str, Any], radius: float = MAP12_ELITE_PILE_RADIUS) -> bool:
+        if not self._hunting_map12() or self.position is None:
+            return False
+        try:
+            mx, my = float(monster["x"]), float(monster["y"])
+        except (KeyError, TypeError, ValueError):
+            return False
+        for _eid, mon in self.monsters.living_on_map(self.position.map_id):
+            if not self.is_elite(mon):
+                continue
+            try:
+                if math.hypot(float(mon["x"]) - mx, float(mon["y"]) - my) <= radius:
+                    return True
+            except (KeyError, TypeError, ValueError):
+                continue
+        return False
+
+    def _map12_elite_in_range(self, radius: float | None = None) -> bool:
+        if not self._hunting_map12() or self.position is None:
+            return False
+        reach = float(radius if radius is not None else self.elite_view_range)
+        me = (self.position.x, self.position.y)
+        for _eid, mon in self.monsters.living_on_map(self.position.map_id):
+            if not self.is_elite(mon):
+                continue
+            try:
+                if math.dist(me, (float(mon["x"]), float(mon["y"]))) <= reach:
+                    return True
+            except (KeyError, TypeError, ValueError):
+                continue
+        return False
+
+    def _map12_leave_elite_pile(self, now: float) -> None:
+        """遇到精英就放棄目前怪堆，換一堆。"""
+        sid = getattr(self, "cluster_site_id", None)
+        if sid is not None:
+            if not hasattr(self, "_site_lock"):
+                self._site_lock = {}
+            self._site_lock[sid] = now + 90.0
+            self.cluster_site_id = None
+        if self.attack_target or self.chase_target or sid is not None:
+            log.info("荒野深處遇到精英，換堆")
+        self.attack_target = None
+        self.chase_target = None
+        self.chase_route = []
+        self._kite_route = []
+        self.cluster_note = "遇到精英，換堆"
+        self.status = "遇到精英，換堆"
+        self.combat_event("遇到精英，換堆", None)
+
     def elite_allowed(self, encounter_id: str, monster: dict[str, Any]) -> bool:
         if not self.is_elite(monster):
             return True
+        if self._hunting_map12():
+            return False
         if encounter_id == self.attack_target:
             return True  # never abandon a fight already started
         potions = self.health_potion_count()
@@ -3015,6 +3560,8 @@ class HuntController:
             self.cluster_kite = bool(options["cluster_kite"])
         if "kite_elite_only" in options:
             self.kite_elite_only = bool(options["kite_elite_only"])
+        if "kite_elites" in options:
+            self.kite_elites = bool(options["kite_elites"])
         if "max_pull" in options:
             try:
                 value = int(options["max_pull"])
@@ -3244,11 +3791,11 @@ class HuntController:
     def _radial_retreat_goal(self, threat: tuple[float, float], distance: float, near_center: tuple[float, float] | None = None) -> tuple[float, float] | None:
         if self.position is None:
             return None
-        hold_dist = KITE_SHOOT_MIN if near_center else KITE_HOLD_DIST
+        hold_dist = KITE_SHOOT_MIN if near_center else self._kite_hold_dist()
         me = (self.position.x, self.position.y)
         dx, dy = me[0] - threat[0], me[1] - threat[1]
         base = math.atan2(dy, dx)
-        need = max(KITE_HOLD_DIST - distance, 160.0)
+        need = max(self._kite_hold_dist() - distance, 160.0)
         need = min(need, KITE_RETREAT_STEP)
         candidates = []
         # Sweep a wide fan (including due-side) so a wall in a straight line
@@ -3295,17 +3842,15 @@ class HuntController:
         return (me[0] + dx / norm * need, me[1] + dy / norm * need)
 
     def kite_active(self, encounter_id: str) -> bool:
-        if not self.is_ranged() or not self.cluster_kite:
-            return False  # 「風箏」 off: stand and shoot
-        monster = self.monsters.monsters.get(encounter_id) or {}
-        if self.kite_elite_only and not self.is_elite(monster):
+        if not self.is_ranged():
             return False
-        lv = monster_level(monster)
-        if not self.is_elite(monster) and lv is not None and lv <= int(self.no_kite_level):
-            return False  # low-level normal mobs: stand and shoot
+        monster = self.monsters.monsters.get(encounter_id) or {}
         if encounter_id in self.kite_failed:
             return False
-        return True
+        # 風箏精英：只風箏精英；一般怪與遠程怪物都用自動掛機／站著打。
+        if self.kite_elites and self.is_elite(monster):
+            return True
+        return False
 
     def abort_kite(self, encounter_id: str, reason: str) -> None:
         monster = self.monsters.monsters.get(encounter_id) or {}
@@ -3715,7 +4260,7 @@ class HuntController:
 
     # ---- cluster orbit kiting (t621) ---------------------------------------------
     def cluster_mode(self) -> bool:
-        return bool(self.cluster_kite) and self.is_ranged()
+        return bool(self.kite_elites) and self.is_ranged()
 
     def update_clusters(self, now: float) -> None:
         if self.position is None or now - self._cluster_update_at < 0.3:
@@ -3780,6 +4325,8 @@ class HuntController:
 
     def _site_contested(self, site: Any) -> bool:
         """有 3 個以上其他玩家在這個怪堆才算搶（1–2 人一起打可以接受）。"""
+        if self._hunting_map12():
+            return False
         if self.position is None:
             return False
         damaged = False
@@ -3857,6 +4404,17 @@ class HuntController:
         """Every few minutes walk to the nearest unexplored part of the map to find new 怪堆."""
         if self.position is None or not self.explore_enabled or self.is_dead or not self.auto_farm:
             return None
+        if self.quest_map_target or getattr(self, "quest_map_quest_id", None) or has_active_auto_kill_quest(self.quests):
+            self.explore_route = []  # 解任務中：不探索，直接打附近的怪
+            return None
+        if self.position is not None and int(self.position.map_id) in (12, 13):
+            self.explore_full = False
+            self.update_clusters(now)
+            has_open = any(now >= self._site_lock.get(getattr(s, "id", None), 0.0) for s in self.clusters.sites)
+            if has_open or candidates:
+                if self.explore_route:
+                    self._stop_explore(now, "已有怪堆，先打")
+                return None
         me = (self.position.x, self.position.y)
         self._explore_seen[self._explore_cell(*me)] = now
         self.update_clusters(now)
@@ -4039,6 +4597,9 @@ class HuntController:
         distance, encounter_id, monster = target
         if self.kite_elite_only and not self.is_elite(monster):
             return None  # 僅風箏精英：普通怪改由一般邏輯站著射
+        _lv = monster_level(monster)
+        if not self.is_elite(monster) and _lv is not None and _lv <= int(self.no_kite_level):
+            return None  # 低等普通怪不風箏：交給一般邏輯直接追打，不因旁邊的怪後退
         reach = attack_reach(self.character_class, "prepare")
         # Nearest threat = any living monster of this cluster (they may all aggro).
         threat, threat_dist = None, float("inf")
@@ -4096,7 +4657,7 @@ class HuntController:
             packet = self._move_to(goal, now, threat=threat_pt) if goal is not None else None
             if packet is not None:
                 self.activity = "拉開距離"
-                self.status = f"拉開距離：最近的怪 {threat_dist:.0f} → {int(KITE_HOLD_DIST)}"
+                self.status = f"拉開距離：最近的怪 {threat_dist:.0f} → {int(self._kite_hold_dist())}"
                 self.combat_event("後退", monster, throttle=3.0, key="retreat")
                 return ("chase", packet)
         elif threat_dist > KITE_SHOOT_MIN:
@@ -4125,7 +4686,7 @@ class HuntController:
                 # Stay off the monster; never walk onto it.
                 vx, vy = me[0] - mx, me[1] - my
                 norm = math.hypot(vx, vy) or 1.0
-                stay = max(KITE_SHOOT_MIN, min(distance, min(reach - 15.0, KITE_HOLD_DIST)))
+                stay = max(KITE_SHOOT_MIN, min(distance, min(reach - 15.0, self._kite_hold_dist())))
                 goal = (mx + vx / norm * stay, my + vy / norm * stay)
             self.chase_target = encounter_id
             packet = self._move_to(goal, now, threat=(mx, my), center=center)
@@ -4269,8 +4830,10 @@ class HuntController:
         self.auth_rejected = False
         self.login_error = False
         self.last_snapshot_at = 0.0
+        self.quest_relogin_requested = False
+        self._last_relogin_started_at = time.monotonic()
         self.recover_from_stuck()
-        self.status = "卡住恢復：重新登入並回到原地圖"
+        self.status = "重新登入並回到原地圖"
         log.warning("%s", self.status)
 
     def attack_still_valid(self, encounter_id: str) -> bool:
@@ -4465,6 +5028,13 @@ async def run_hunt(
                             controller.efficiency.add_time(last_kind, now - last_kind_at)
                         last_kind, last_kind_at = kind, now
                         controller.efficiency.save(now)
+                        if controller.quest_relogin_requested:
+                            if controller.defer_quests_for_stamina():
+                                controller.quest_relogin_requested = False
+                            else:
+                                log.info("沒有可自動接取的打怪任務，重新登入以刷新任務列表。")
+                                relogin = True
+                                break
                         verdict = watchdog.observe(controller, kind, now)
                         if verdict == "drop":
                             controller.drop_stale_target((watchdog.alert or {}).get("reason", ""))

@@ -19,7 +19,7 @@ from eth_account import Account
 from eth_account.messages import encode_defunct
 
 from tabbybot.config import AppConfig, assert_official_url
-from tabbybot.quests import extract_quests, is_quest_limit_response, quest_error_text
+from tabbybot.quests import extract_quests, extract_quest_quota, is_quest_limit_response, quest_error_text
 from tabbybot.constants import CHAIN_ID, PING_INTERVAL_SEC, PONG_TIMEOUT_SEC
 from tabbybot.loggingutil import redact_mapping, short_address, token_fingerprint
 from tabbybot.protocol import ProtocolError, attach_seq_life, build_auth_frame, build_ping
@@ -208,7 +208,49 @@ class QuestLimitReached(QuestError):
     pass
 
 
-def fetch_quests(config: AppConfig, token: str) -> list[dict[str, Any]]:
+_QUEST_PAYLOAD_SHAPE_LOGGED = False
+
+
+def _log_quest_payload_shape(payload: object) -> None:
+    """Log keys (and numeric quota-like values) once, to locate completed/limit fields."""
+    global _QUEST_PAYLOAD_SHAPE_LOGGED
+    if _QUEST_PAYLOAD_SHAPE_LOGGED:
+        return
+    _QUEST_PAYLOAD_SHAPE_LOGGED = True
+    rows: list[str] = []
+
+    def walk(value: object, path: str, depth: int = 0) -> None:
+        if depth > 4 or len(rows) >= 80:
+            return
+        if isinstance(value, dict):
+            for key, child in value.items():
+                child_path = f"{path}.{key}" if path else str(key)
+                if isinstance(child, dict):
+                    rows.append(f"{child_path}=dict")
+                    walk(child, child_path, depth + 1)
+                elif isinstance(child, list):
+                    rows.append(f"{child_path}=list({len(child)})")
+                    if child:
+                        walk(child[0], child_path + "[]", depth + 1)
+                elif isinstance(child, bool):
+                    rows.append(f"{child_path}=bool")
+                elif isinstance(child, (int, float)):
+                    key_l = str(key).casefold()
+                    if any(token in key_l for token in ("quest", "daily", "task", "limit", "cap", "quota", "complete", "count", "today", "slot", "max", "used")):
+                        rows.append(f"{child_path}={child}")
+                    else:
+                        rows.append(f"{child_path}=number")
+                else:
+                    rows.append(f"{child_path}={type(child).__name__}")
+        elif isinstance(value, list) and value:
+            walk(value[0], path + "[]", depth)
+
+    walk(payload, "")
+    log.info("任務 API 資料欄位：%s", "；".join(rows) or type(payload).__name__)
+
+
+def fetch_quest_board(config: AppConfig, token: str) -> dict[str, Any]:
+    """Fetch /progression/quests and keep both the list and any daily quota fields."""
     url = config.api_base.rstrip("/") + "/progression/quests"
     headers = {
         "Authorization": "Bearer " + token,
@@ -220,7 +262,13 @@ def fetch_quests(config: AppConfig, token: str) -> list[dict[str, Any]]:
     status, payload, _ = _json_request(url, method="GET", headers=headers, timeout=10)
     if status >= 400:
         raise QuestError(payload.get("message") or payload.get("code") or f"讀取任務失敗 HTTP {status}")
-    return extract_quests(payload)
+    _log_quest_payload_shape(payload)
+    quota = extract_quest_quota(payload)
+    return {"quests": extract_quests(payload), "quota": quota}
+
+
+def fetch_quests(config: AppConfig, token: str) -> list[dict[str, Any]]:
+    return fetch_quest_board(config, token)["quests"]
 
 
 def accept_quest(config: AppConfig, token: str, quest_id: int) -> dict[str, Any]:

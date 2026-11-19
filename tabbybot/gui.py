@@ -25,6 +25,7 @@ from tabbybot.client import (
     fetch_equipment,
     fetch_player,
     fetch_progression,
+    fetch_quest_board,
     fetch_quest_delivery,
     fetch_quests,
     fetch_shop,
@@ -37,6 +38,7 @@ from tabbybot.farm import DEFAULT_FARM_LEVEL, is_farmable_map
 from tabbybot.quests import (
     REPLACE_UNAVAILABLE,
     format_delivery_prompt,
+    format_quest_quota,
     format_quest_rows,
     quest_id,
     quest_summary,
@@ -89,6 +91,7 @@ COMBAT_DEFAULTS = {
     "overlevel_max": 20,
     "cluster_kite": True,
     "kite_elite_only": False,
+    "kite_elites": False,
     "max_pull": 1,
 }
 
@@ -125,7 +128,7 @@ def clean_combat_options(options: dict[str, Any], base: dict[str, Any]) -> dict[
         except (TypeError, ValueError) as exc:
             raise GuiError("同時最多拉幾隻必須是 1–5") from exc
         result["max_pull"] = 1
-    for key in ("no_potion", "potion_on_player_damage", "prefer_elite", "auto_potion", "cluster_kite", "kite_elite_only"):
+    for key in ("no_potion", "potion_on_player_damage", "prefer_elite", "auto_potion", "cluster_kite", "kite_elite_only", "kite_elites"):
         if key in options:
             result[key] = bool(options[key])
     # Simplified UI (t626): no 越級 concept, one 「風箏」 toggle. Old saved values are migrated off.
@@ -193,6 +196,8 @@ class GuiApp:
         logging.getLogger().addHandler(self._log_handler)
         self.quests: list[dict[str, Any]] = []
         self.quest_status = "尚未讀取任務"
+        self.quest_completed: int | None = None
+        self.quest_limit: int | None = None
         self.quest_error = ""
         self.daily_running = False
         self.quest_options = {
@@ -202,6 +207,8 @@ class GuiApp:
             "auto_replace": False,
             "skip_vendetta": False,
             "quest_reroll": False,
+            "quest_priority": False,
+            "fast_quest": False,
             "no_kite_level": 30,
             "auto_farm": True,
             "farm_target_level": int(getattr(getattr(config, "farm", None), "target_level", DEFAULT_FARM_LEVEL) or DEFAULT_FARM_LEVEL),
@@ -265,7 +272,8 @@ class GuiApp:
         self._apply_unlocked(password, address, wallet.private_key)
         self._remember_password(password, remember)
         log.info("已建立本機保險庫：%s", short_address(address))
-        threading.Thread(target=self._safe_refresh_quests, daemon=True, name="tabbybot-quest-refresh").start()
+        if not getattr(self, "logged_out", False):
+            threading.Thread(target=self._safe_refresh_quests, daemon=True, name="tabbybot-quest-refresh").start()
         return address
 
     def unlock(self, password: str, remember: bool = True) -> str:
@@ -275,7 +283,8 @@ class GuiApp:
         self._apply_unlocked(password, wallet.address, wallet.private_key)
         self._remember_password(password, remember)
         log.info("已解鎖錢包：%s", short_address(wallet.address))
-        threading.Thread(target=self._safe_refresh_quests, daemon=True, name="tabbybot-quest-refresh").start()
+        if not getattr(self, "logged_out", False):
+            threading.Thread(target=self._safe_refresh_quests, daemon=True, name="tabbybot-quest-refresh").start()
         return wallet.address
 
     def try_auto_unlock(self) -> bool:
@@ -299,7 +308,10 @@ class GuiApp:
             return False
         self._apply_unlocked(password, wallet.address, wallet.private_key)
         log.info("已用本機鑰匙圈自動解鎖：%s", short_address(wallet.address))
-        threading.Thread(target=self._safe_refresh_quests, daemon=True, name="tabbybot-quest-refresh").start()
+        if not getattr(self, "logged_out", False):
+            threading.Thread(target=self._safe_refresh_quests, daemon=True, name="tabbybot-quest-refresh").start()
+        else:
+            log.info("目前是登出狀態，不會自動連上遊戲。")
         return True
 
     def set_auto_unlock(self, enabled: bool) -> None:
@@ -350,6 +362,8 @@ class GuiApp:
 
     def _ensure_token(self) -> str:
         """Reuse a cached game session, and never start two signature logins at once."""
+        if getattr(self, "logged_out", False):
+            raise GuiError("已登出遊戲，請先按「開始打怪」再連線。")
         key = self._require_key()
         with self.lock:
             if self.game_token:
@@ -418,7 +432,8 @@ class GuiApp:
         def later() -> None:
             time.sleep(delay)
             if (stop_evt.is_set() or self.hunt_running or self._hunt_stop is not stop_evt
-                    or getattr(self, "_user_stop_at", 0.0) >= now):
+                    or getattr(self, "_user_stop_at", 0.0) >= now
+                    or getattr(self, "logged_out", False)):
                 return
             try:
                 self.start_hunt(dict(options))
@@ -429,6 +444,12 @@ class GuiApp:
         threading.Thread(target=later, daemon=True, name="tabbybot-auto-restart").start()
 
     def start_hunt(self, options: dict[str, Any]) -> None:
+        if getattr(self, "logged_out", False):
+            self.logged_out = False
+            with self.lock:
+                self.game_token = ""
+            self._save_settings()
+            log.info("已結束登出狀態，準備登入遊戲。")
         if self._session_alive():
             self._resume_hunt(options)
             return
@@ -544,6 +565,24 @@ class GuiApp:
         if thread is not None and thread.is_alive() and thread is not threading.current_thread():
             thread.join(timeout=3)
         self.hunt_running = False
+        self._holder.pop("controller", None)
+
+    def logout(self) -> None:
+        """Stop hunting, close the game session, and do not auto-reconnect until the user starts again."""
+        self.logged_out = True
+        self._user_stop_at = time.time()
+        self._save_settings()
+        try:
+            self.stop_market()
+        except Exception:
+            pass
+        self._disconnect_hunt()
+        with self.lock:
+            self.game_token = ""
+            self._holder.pop("controller", None)
+        self.hunt_error = ""
+        self.quest_status = "已登出遊戲"
+        log.info("已登出遊戲。控制台仍開著，再按「開始打怪」才會重新登入。")
 
     def stop_move(self) -> None:
         controller = self._holder.get("controller")
@@ -575,9 +614,15 @@ class GuiApp:
             self._apply_quest_flags(controller)
 
     def update_quest_options(self, options: dict[str, Any]) -> None:
-        for key in ("auto_quest", "task_limited", "quest_map_auto", "auto_replace", "skip_vendetta", "quest_reroll", "auto_farm"):
+        for key in ("auto_quest", "task_limited", "quest_map_auto", "auto_replace", "skip_vendetta", "quest_reroll", "quest_priority", "fast_quest", "auto_farm"):
             if key in options:
                 self.quest_options[key] = bool(options[key])
+        # 自動任務不再提供取消 / 重骰 / 跳過（會耗每日次數）；接 100 隻時一律進任務地圖。
+        self.quest_options["auto_replace"] = False
+        self.quest_options["skip_vendetta"] = False
+        self.quest_options["quest_reroll"] = False
+        if self.quest_options.get("auto_quest"):
+            self.quest_options["quest_map_auto"] = True
         if "no_kite_level" in options:
             try:
                 self.quest_options["no_kite_level"] = max(0, min(200, int(options["no_kite_level"])))
@@ -616,6 +661,10 @@ class GuiApp:
             "no_kite_level": self.quest_options.get("no_kite_level", 30),
         })
         controller.skipped_quest_ids = set(self.skipped_quest_ids)
+        if self.quest_completed is not None or self.quest_limit is not None:
+            controller.apply_quest_quota({"completed": self.quest_completed, "limit": self.quest_limit})
+        if hasattr(controller, "defer_quests_for_stamina") and controller.defer_quests_for_stamina():
+            controller.note_stamina_priority()
         if self.pending_delivery and not controller.pending_delivery and not (
                 self.quest_options.get("skip_vendetta") and str(self.pending_delivery.get("objective_type") or "").upper() == "VENDETTA"):
             controller.pending_delivery = self.pending_delivery
@@ -629,13 +678,18 @@ class GuiApp:
 
     def refresh_quests(self) -> list[dict[str, Any]]:
         token = self._ensure_token()
-        quests = fetch_quests(self.config, token)
+        board = fetch_quest_board(self.config, token)
+        quests = board.get("quests") or []
+        quota = board.get("quota") or {}
         with self.lock:
             self.quests = quests
-            self.quest_status = quest_summary(quests)
+            self.quest_completed = quota.get("completed", self.quest_completed)
+            self.quest_limit = quota.get("limit", self.quest_limit)
+            self.quest_status = quest_summary(quests, completed=self.quest_completed, limit=self.quest_limit, fast=bool(self.quest_options.get("fast_quest")))
             self.quest_error = ""
         controller = self._holder.get("controller")
         if controller is not None:
+            controller.apply_quest_quota(quota)
             controller.update_quests(quests)
         log.info("%s", self.quest_status)
         return quests
@@ -647,6 +701,10 @@ class GuiApp:
         self.quest_options["auto_replace"] = bool(options.get("auto_replace", False))
         self.quest_options["skip_vendetta"] = bool(options.get("skip_vendetta", False))
         self.quest_options["quest_reroll"] = bool(options.get("quest_reroll", False))
+        if "quest_priority" in options:
+            self.quest_options["quest_priority"] = bool(options["quest_priority"])
+        if "fast_quest" in options:
+            self.quest_options["fast_quest"] = bool(options["fast_quest"])
         self.quest_options["auto_farm"] = bool(options.get("auto_farm", True))
         if "no_kite_level" in options:
             try:
@@ -794,6 +852,8 @@ class GuiApp:
         self.quest_status = f"已跳過「{prompt.get('title') or '任務'}」，繼續處理打怪任務。"
 
     def start_market(self, options: dict[str, Any]) -> None:
+        if getattr(self, "logged_out", False):
+            raise GuiError("已登出遊戲，請先按「開始打怪」再連線。")
         if self.market_running:
             raise GuiError("商城監控已經在進行了。")
         name = str(options.get("name_contains") or "")
@@ -1010,6 +1070,7 @@ class GuiApp:
 
     def _load_settings(self) -> None:
         self._saved_settings: dict[str, Any] = {}
+        self.logged_out = False
         try:
             data = json.loads(self.settings_path.read_text("utf-8"))
         except (OSError, ValueError):
@@ -1023,6 +1084,7 @@ class GuiApp:
             except GuiError:
                 pass
         self._apply_saved_quest_options()
+        self.logged_out = bool(data.get("logged_out"))
 
 
     def _saved_pinned_map(self) -> int | None:
@@ -1048,7 +1110,7 @@ class GuiApp:
         quest = self._saved_settings.get("quest") if isinstance(getattr(self, "_saved_settings", None), dict) else None
         if not isinstance(quest, dict):
             return
-        for key in ("auto_quest", "task_limited", "quest_map_auto", "auto_replace", "skip_vendetta", "quest_reroll", "auto_farm"):
+        for key in ("auto_quest", "task_limited", "quest_map_auto", "auto_replace", "skip_vendetta", "quest_reroll", "quest_priority", "fast_quest", "auto_farm"):
             if key in quest:
                 self.quest_options[key] = bool(quest[key])
         if "no_kite_level" in quest:
@@ -1063,6 +1125,11 @@ class GuiApp:
                 return
             if 1 <= level <= 9999:
                 self.quest_options["farm_target_level"] = level
+        self.quest_options["auto_replace"] = False
+        self.quest_options["skip_vendetta"] = False
+        self.quest_options["quest_reroll"] = False
+        if self.quest_options.get("auto_quest"):
+            self.quest_options["quest_map_auto"] = True
 
     def _save_settings(self) -> None:
         try:
@@ -1072,6 +1139,7 @@ class GuiApp:
                 payload["quest"] = dict(self.quest_options)
             if getattr(self, "pinned_map", None):
                 payload["hunt"] = {"pinned_map": int(self.pinned_map)}
+            payload["logged_out"] = bool(getattr(self, "logged_out", False))
             self.settings_path.write_text(json.dumps(payload, ensure_ascii=False), "utf-8")
         except OSError:
             log.info("設定檔無法寫入。")
@@ -1088,9 +1156,9 @@ class GuiApp:
                  "開" if self.combat_options["potion_on_player_damage"] else "關",
                  "開" if self.combat_options["prefer_elite"] else "關",
                  "開" if self.combat_options["auto_potion"] else "關")
-        log.info("風箏 %s，僅風箏精英 %s",
+        log.info("風箏 %s，風箏精英 %s",
                  "開" if self.combat_options["cluster_kite"] else "關",
-                 "開" if self.combat_options.get("kite_elite_only") else "關")
+                 "開" if self.combat_options.get("kite_elites") else "關")
         return dict(self.combat_options)
 
     def map_level_text(self, map_id: Any) -> str:
@@ -1216,7 +1284,9 @@ class GuiApp:
                 "has_nav": map_id in MAP_FILES,
             })
         pill = "尚未解鎖"
-        if self.unlocked():
+        if self.unlocked() and getattr(self, "logged_out", False):
+            pill = "已登出"
+        elif self.unlocked():
             if connected:
                 rtt = hunt.get("rtt_ms")
                 pill = "已連線" + (f" · {rtt} ms" if rtt is not None else "")
@@ -1231,6 +1301,7 @@ class GuiApp:
         return {
             "has_vault": self.has_vault(),
             "unlocked": self.unlocked(),
+            "logged_out": bool(getattr(self, "logged_out", False)),
             "auto_unlock": self.auto_unlock_enabled(),
             "address": short_address(self.address) if self.address else "",
             "hunt_running": self.hunt_running,
@@ -1259,6 +1330,8 @@ class GuiApp:
                 "auto_replace": self.quest_options["auto_replace"] if controller is None else bool(controller.auto_replace),
                 "skip_vendetta": self.quest_options.get("skip_vendetta", False) if controller is None else bool(controller.skip_vendetta),
                 "quest_reroll": self.quest_options.get("quest_reroll", False) if controller is None else bool(getattr(controller, "quest_reroll", False)),
+                "quest_priority": self.quest_options.get("quest_priority", False) if controller is None else bool(getattr(controller, "quest_priority", False)),
+                "fast_quest": self.quest_options.get("fast_quest", False) if controller is None else bool(getattr(controller, "fast_quest", False)),
                 "no_kite_level": self.quest_options.get("no_kite_level", 30) if controller is None else int(getattr(controller, "no_kite_level", 30)),
                 "auto_farm": self.quest_options.get("auto_farm", True) if controller is None else bool(controller.auto_farm),
                 "farm_target_level": self.quest_options.get("farm_target_level", DEFAULT_FARM_LEVEL) if controller is None else int(controller.farm_target_level),
@@ -1269,6 +1342,12 @@ class GuiApp:
             },
             "quests": self._quest_rows_with_levels(controller.quests if controller is not None and controller.quests else self.quests),
             "quest_status": (controller.quest_status if controller is not None and controller.quest_status else self.quest_status),
+            "quest_completed": (getattr(controller, "quest_completed", None) if controller is not None and getattr(controller, "quest_completed", None) is not None else self.quest_completed),
+            "quest_limit": (getattr(controller, "quest_limit", None) if controller is not None and getattr(controller, "quest_limit", None) is not None else self.quest_limit),
+            "quest_quota": format_quest_quota(
+                (getattr(controller, "quest_completed", None) if controller is not None and getattr(controller, "quest_completed", None) is not None else self.quest_completed),
+                (getattr(controller, "quest_limit", None) if controller is not None and getattr(controller, "quest_limit", None) is not None else self.quest_limit),
+            ),
             "quest_error": self.quest_error,
             "daily_running": self.daily_running,
             "pending_delivery": self._current_delivery_prompt(),
@@ -1446,6 +1525,9 @@ def make_handler(app: GuiApp):
             if path == "/api/lock":
                 app.lock_wallet()
                 return {"ok": True}
+            if path == "/api/logout":
+                app.logout()
+                return {"ok": True, "logged_out": True}
             if path == "/api/hunt/start":
                 app.start_hunt(body)
                 return {"ok": True}

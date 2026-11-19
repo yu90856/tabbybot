@@ -31,6 +31,7 @@
         <input type="checkbox" id="opt-auto-unlock" checked /> 開啟時自動解鎖
       </label>
       <button type="button" class="ghost" id="btn-lock" hidden>鎖定錢包</button>
+      <button type="button" class="ghost" id="btn-logout" hidden>登出</button>
     </div>
   </header>
   <div class="alert-banner" id="alert-banner" hidden>
@@ -81,7 +82,6 @@
           <label class="check"><input type="checkbox" id="opt-no-potion" checked /> 禁止喝水（程式完全不喝生命藥水）</label>
           <label class="check"><input type="checkbox" id="opt-potion" /> 生命低於一半時自動喝水</label>
           <label class="check"><input type="checkbox" id="opt-potion-pvp" /> 被玩家攻擊時自動喝水</label>
-          <label class="check"><input type="checkbox" id="opt-elite" /> 只打精英怪</label>
           <label class="check"><input type="checkbox" id="opt-prefer-elite" checked /> 附近有精英時優先打精英</label>
           <label>精英偵測範圍
             <input type="number" id="elite-view-range" min="200" max="2000" step="50" value="700" />
@@ -90,15 +90,15 @@
             <input type="number" id="elite-potion-min" min="0" max="999" step="1" value="3" />
           </label>
           <label class="check"><input type="checkbox" id="opt-cluster" checked /> 風箏（弓手）</label>
-          <label class="check"><input type="checkbox" id="opt-kite-elite" /> 僅風箏精英</label>
-          <p class="tiny" id="cluster-note">開風箏：繞著怪堆外圈邊走邊射，不把怪拉離家太遠，也不從怪物身上穿過去；殺完一隻馬上打下一隻，清空後重生快就原地等。關：站著射。「僅風箏精英」開：只對精英風箏，普通怪站著射。</p>
+          <label class="check"><input type="checkbox" id="opt-kite-elites" /> 風箏精英</label>
+          <p class="tiny" id="cluster-note">預設：走到怪堆開官方自動掛機（有 +5 回血就用；沒有就在原地打，不風箏）。遠程怪物自動不用風箏。勾選「風箏精英」時，精英改用風箏打；血低先撤出仇恨，再開自動掛機用 +5 回血。</p>
           <p class="tiny" id="elite-note">打完目前目標後，再轉打偵測範圍內的精英（預設 700，約莫畫面上可見的距離）。近戰：藥水少於 N 瓶不主動打精英，附近已有人在打的會一起參與。</p>
           <div class="btn-row">
             <button type="button" class="primary wide" id="btn-hunt-start">開始打怪</button>
             <button type="button" class="danger wide" id="btn-hunt-stop">停止打怪</button>
             <button type="button" class="secondary wide" id="btn-hunt-stop-now">立刻停止</button>
           </div>
-          <p class="tiny">停止打怪不會登出：沒有在打架就原地站著；有目標會先打完再停。立刻停止則馬上站住。被打時會還擊，但不會跑去打新的怪。再按開始打怪會從原地繼續，不必重登。</p>
+          <p class="tiny">停止打怪不會登出：沒有在打架就原地站著；有目標會先打完再停。立刻停止則馬上站住。被打時會還擊，但不會跑去打新的怪。再按開始打怪會從原地繼續，不必重登。右上角「登出」會關閉遊戲連線，角色離線，再按開始打怪才會重新登入。</p>
         </article>
         <article class="card">
           <h2>地圖與復活</h2>
@@ -132,24 +132,26 @@
             <button type="button" class="secondary" id="btn-quest-refresh">重新整理任務</button>
           </div>
           <p class="quest-status" id="quest-status">尚未讀取任務</p>
-          <label class="check"><input type="checkbox" id="opt-auto-quest" checked /> 完成後自動接打怪任務</label>
+          <label class="check"><input type="checkbox" id="opt-quest-priority" /> 任務優先（先解任務，再回去練功）</label>
+          <label class="check"><input type="checkbox" id="opt-fast-quest" /> 快速解任務（優先接低於 50 隻的打怪任務，沒有再接 100 隻）</label>
+          <label class="check"><input type="checkbox" id="opt-auto-quest" checked /> 自動接取「打 100 隻怪」任務（沒有則重登刷新，不取消、不耗次數）</label>
           <label class="check"><input type="checkbox" id="opt-task-limited" checked /> 只打任務怪</label>
-          <label class="check"><input type="checkbox" id="opt-quest-map" checked /> 按任務地圖自動進圖</label>
-          <label class="check"><input type="checkbox" id="opt-auto-replace" /> 需要交道具或裝備的任務自動換掉</label>
-          <label class="check"><input type="checkbox" id="opt-skip-vendetta" /> 自動跳過仇殺任務（擊敗玩家）</label>
-          <label class="check"><input type="checkbox" id="opt-quest-reroll" /> 沒有可接的任務時，重新打開任務清單刷新（測試中，不取消、不耗次數）</label>
+          <label class="check" hidden><input type="checkbox" id="opt-quest-map" checked /> 按任務地圖自動進圖</label>
+          <label class="check" hidden><input type="checkbox" id="opt-auto-replace" /> 需要交道具或裝備的任務自動換掉</label>
+          <label class="check" hidden><input type="checkbox" id="opt-skip-vendetta" /> 自動跳過仇殺任務（擊敗玩家）</label>
+          <label class="check" hidden><input type="checkbox" id="opt-quest-reroll" /> 沒有可接的任務時，重新打開任務清單刷新（測試中，不取消、不耗次數）</label>
           <label class="inline-level">普通怪不風箏
             <select id="no-kite-level"><option value="0">全部風箏</option><option value="10">Lv10 以下</option><option value="20">Lv20 以下</option><option value="30" selected>Lv30 以下</option><option value="40">Lv40 以下</option><option value="50">Lv50 以下</option><option value="60">Lv60 以下</option><option value="70">Lv70 以下</option><option value="80">Lv80 以下</option><option value="90">Lv90 以下</option><option value="100">Lv100 以下</option></select>
           </label>
           <label class="check"><input type="checkbox" id="opt-auto-farm" checked /> 沒任務或等待確認時自動練功</label>
           <label class="inline-level">練功等級
-            <select id="farm-level"><option value="10">Lv10</option><option value="20">Lv20</option><option value="30" selected>Lv30</option><option value="40">Lv40</option><option value="50">Lv50</option></select>
+            <select id="farm-level"><option value="10">Lv10</option><option value="20">Lv20</option><option value="30" selected>Lv30</option><option value="40">Lv40</option><option value="50">Lv50</option><option value="60">Lv60</option></select>
           </label>
-          <div class="btn-row">
+          <div class="btn-row" hidden>
             <button type="button" class="primary wide" id="btn-daily-start">開始每日任務</button>
             <button type="button" class="danger wide" id="btn-daily-stop">停止每日任務</button>
           </div>
-          <p class="tiny">打怪任務會自動接取並完成。需要交付裝備或消耗道具的任務預設會暫停，列出將要交出的物品與數量，經你按「確認交付」後才會提交；若開啟自動練功，等待確認期間會先去打練功等級的怪。「自動換掉」預設關閉；遊戲沒有更換任務的接口，開啟後只會略過尚未接取的交付任務。廢棄遺跡、秘寶之地不會使用入場券。</p>
+          <p class="tiny">預設先把耐力用完再解任務。勾選「任務優先」則即使還有耐力也會先解任務，完成後再回去練功。勾選「快速解任務」會優先接擊殺數低於 50 隻的打怪任務並直接去打完；沒有則改接「打 100 隻怪」，再沒有則重登刷新（不取消、不耗次數）。達每日上限後改回掛機指定地圖。上方狀態會顯示今日完成數／上限（若遊戲資料有提供）。廢棄遺跡、秘寶之地不會使用入場券。</p>
           <div class="table-wrap quest-table-wrap">
             <table id="quest-table">
               <thead>
@@ -324,7 +326,7 @@
       <div class="btn-row">
         <button type="button" class="primary wide" id="btn-delivery-confirm">確認交付</button>
         <button type="button" class="danger wide" id="btn-delivery-skip">跳過</button>
-        <button type="button" class="danger wide" id="btn-delivery-cancel">取消任務</button>
+        <button type="button" class="danger wide" id="btn-delivery-cancel" hidden>取消任務</button>
         <button type="button" class="secondary wide" id="btn-delivery-close">關閉</button>
       </div>
     </div>

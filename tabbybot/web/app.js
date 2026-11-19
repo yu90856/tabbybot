@@ -105,7 +105,7 @@
     const status = $("quest-status");
     const table = $("quest-table");
     if (!status || !table) return;
-    status.textContent = state.quest_error || state.quest_status || "尚未讀取任務";
+    status.textContent = state.quest_error || state.quest_status || state.quest_quota || "尚未讀取任務";
     const rows = state.quests || [];
     const body = table.querySelector("tbody");
     if (!rows.length) {
@@ -651,6 +651,10 @@
     gate.hidden = unlocked;
     workspace.hidden = !unlocked;
     $("btn-lock").hidden = !unlocked;
+    if ($("btn-logout")) {
+      $("btn-logout").hidden = !unlocked;
+      $("btn-logout").disabled = !!state.logged_out;
+    }
     if ($("auto-unlock-wrap")) $("auto-unlock-wrap").hidden = !unlocked;
     if ($("opt-auto-unlock") && document.activeElement !== $("opt-auto-unlock")) {
       $("opt-auto-unlock").checked = state.auto_unlock !== false;
@@ -671,9 +675,14 @@
     pill.textContent = state.pill || "尚未解鎖";
     pill.classList.toggle("is-on", !!state.connected);
     selectedMap = (state.options && state.options.map_id) || selectedMap;
-    if ($("opt-elite")) $("opt-elite").checked = !!(state.options && state.options.elite_only);
     if ($("opt-auto") && state.options) $("opt-auto").checked = state.options.auto_combat !== false;
     if ($("opt-return") && state.options) $("opt-return").checked = state.options.auto_return !== false;
+    if ($("opt-quest-priority") && document.activeElement !== $("opt-quest-priority")) {
+      $("opt-quest-priority").checked = !!(state.options && state.options.quest_priority);
+    }
+    if ($("opt-fast-quest") && document.activeElement !== $("opt-fast-quest")) {
+      $("opt-fast-quest").checked = !!(state.options && state.options.fast_quest);
+    }
     if (state.daily_running) {
       if ($("opt-auto-quest") && document.activeElement !== $("opt-auto-quest")) {
         $("opt-auto-quest").checked = !!(state.options && state.options.auto_quest);
@@ -782,7 +791,8 @@
       if (el && document.activeElement !== el && c[map[id]] !== undefined) el.checked = !!c[map[id]];
     });
     if ($("opt-cluster") && document.activeElement !== $("opt-cluster") && c.cluster_kite !== undefined) $("opt-cluster").checked = !!c.cluster_kite;
-    if ($("opt-kite-elite") && document.activeElement !== $("opt-kite-elite") && c.kite_elite_only !== undefined) $("opt-kite-elite").checked = !!c.kite_elite_only;
+    if ($("opt-kite-elites") && document.activeElement !== $("opt-kite-elites") && c.kite_elites !== undefined) $("opt-kite-elites").checked = !!c.kite_elites;
+    else if ($("opt-kite-elites") && document.activeElement !== $("opt-kite-elites") && c.kite_elite_only !== undefined) $("opt-kite-elites").checked = !!c.kite_elite_only;
     if ($("max-pull") && document.activeElement !== $("max-pull") && c.max_pull) $("max-pull").value = String(c.max_pull);
     if ($("cluster-note") && (state.hunt || {}).cluster_note) $("cluster-note").textContent = state.hunt.cluster_note;
     const num = $("elite-potion-min");
@@ -835,7 +845,8 @@
         elite_potion_min: parseInt($("elite-potion-min").value || "0", 10),
         elite_view_range: parseInt(($("elite-view-range") && $("elite-view-range").value) || "700", 10),
         cluster_kite: $("opt-cluster") ? $("opt-cluster").checked : true,
-        kite_elite_only: $("opt-kite-elite") ? $("opt-kite-elite").checked : false,
+        kite_elites: $("opt-kite-elites") ? $("opt-kite-elites").checked : false,
+        kite_elite_only: false,
         max_pull: 1,
       });
     } catch (err) { toast(String(err.message || err)); }
@@ -962,11 +973,16 @@
   $("btn-lock").addEventListener("click", async () => {
     try { await api("/api/lock", {}); await refresh(); } catch (err) { toast(err.message); }
   });
+  if ($("btn-logout")) {
+    $("btn-logout").addEventListener("click", async () => {
+      try { await api("/api/logout", {}); toast("已登出遊戲"); await refresh(); } catch (err) { toast(err.message); }
+    });
+  }
   $("btn-hunt-start").addEventListener("click", async () => {
     try {
       await api("/api/hunt/start", {
         map_id: selectedMap,
-        elite_only: $("opt-elite").checked,
+        elite_only: false,
         auto_combat: $("opt-auto").checked,
         auto_return: $("opt-return").checked
       });
@@ -983,11 +999,12 @@
   $("btn-stop-move").addEventListener("click", async () => {
     try { await api("/api/hunt/stop-move", {}); await refresh(); } catch (err) { toast(err.message); }
   });
-  ["opt-elite", "opt-auto", "opt-return"].forEach((id) => {
+  ["opt-auto", "opt-return"].forEach((id) => {
+    if (!$(id)) return;
     $(id).addEventListener("change", async () => {
       try {
         await api("/api/hunt/options", {
-          elite_only: $("opt-elite").checked,
+          elite_only: false,
           auto_combat: $("opt-auto").checked,
           auto_return: $("opt-return").checked,
           map_id: selectedMap
@@ -999,9 +1016,11 @@
     await api("/api/quests/options", {
       auto_quest: $("opt-auto-quest").checked,
       task_limited: $("opt-task-limited").checked,
-      quest_map_auto: $("opt-quest-map").checked,
-      auto_replace: $("opt-auto-replace").checked,
-      skip_vendetta: $("opt-skip-vendetta").checked, quest_reroll: $("opt-quest-reroll") ? $("opt-quest-reroll").checked : false,
+      quest_map_auto: true,
+      auto_replace: false,
+      skip_vendetta: false, quest_reroll: false,
+      quest_priority: $("opt-quest-priority") ? $("opt-quest-priority").checked : false,
+      fast_quest: $("opt-fast-quest") ? $("opt-fast-quest").checked : false,
       no_kite_level: $("no-kite-level") ? Number($("no-kite-level").value) : 30,
       auto_farm: $("opt-auto-farm") ? $("opt-auto-farm").checked : true,
       farm_target_level: $("farm-level") ? Number($("farm-level").value || 30) : 30
@@ -1020,9 +1039,11 @@
         map_id: selectedMap,
         auto_quest: $("opt-auto-quest").checked,
         task_limited: $("opt-task-limited").checked,
-        quest_map_auto: $("opt-quest-map").checked,
-        auto_replace: $("opt-auto-replace").checked,
-        skip_vendetta: $("opt-skip-vendetta").checked, quest_reroll: $("opt-quest-reroll") ? $("opt-quest-reroll").checked : false,
+        quest_map_auto: true,
+        auto_replace: false,
+        skip_vendetta: false, quest_reroll: false,
+        quest_priority: $("opt-quest-priority") ? $("opt-quest-priority").checked : false,
+        fast_quest: $("opt-fast-quest") ? $("opt-fast-quest").checked : false,
       no_kite_level: $("no-kite-level") ? Number($("no-kite-level").value) : 30,
         no_kite_level: $("no-kite-level") ? Number($("no-kite-level").value) : 30,
         auto_farm: $("opt-auto-farm") ? $("opt-auto-farm").checked : true,
@@ -1058,7 +1079,7 @@
       await refresh();
     } catch (err) { toast(err.message); await refresh(); }
   });
-  ["opt-auto-quest", "opt-task-limited", "opt-quest-map", "opt-auto-replace", "opt-skip-vendetta", "opt-quest-reroll", "opt-auto-farm", "farm-level", "no-kite-level"].forEach((id) => {
+  ["opt-quest-priority", "opt-fast-quest", "opt-auto-quest", "opt-task-limited", "opt-quest-map", "opt-auto-replace", "opt-skip-vendetta", "opt-quest-reroll", "opt-auto-farm", "farm-level", "no-kite-level"].forEach((id) => {
     if ($(id)) $(id).addEventListener("change", async () => {
       try { await postQuestOptions(); } catch (err) { toast(err.message); }
     });

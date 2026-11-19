@@ -7,7 +7,7 @@ from typing import Any, Iterable, Mapping, MutableMapping, Sequence
 from tabbybot.constants import MAP_NAMES, SPECIAL_ENTRY_MAPS
 
 # Town (1) is not a grinding map. Maps 5 and 7 need special entry items.
-FARMABLE_MAPS = frozenset({2, 3, 4, 6, 8, 9, 10})
+FARMABLE_MAPS = frozenset({2, 3, 4, 6, 8, 9, 10, 12, 13})
 DEFAULT_FARM_MAP = 2
 DEFAULT_FARM_LEVEL = 30
 MAX_LEVEL_SAMPLES = 200

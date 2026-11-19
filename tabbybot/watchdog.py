@@ -73,13 +73,23 @@ def _exp_key(controller: Any) -> tuple:
     return (exp, polled, level)
 
 
+def _is_dead(controller: Any) -> bool:
+    if getattr(controller, "is_dead", False):
+        return True
+    try:
+        hp = int((getattr(controller, "self_state", {}) or {}).get("health"))
+    except (TypeError, ValueError):
+        return False
+    return hp <= 0
+
+
 def _is_hunting(controller: Any, kind: str) -> bool:
     if getattr(controller, "hunt_idle", False):
         return False
-    if getattr(controller, "is_dead", False):
-        return False
     if not bool(getattr(controller, "auto_combat", True)):
         return False
+    if _is_dead(controller):
+        return True  # 死亡也算卡住，不能略過看門狗
     return kind in HUNTING_KINDS
 
 
@@ -148,6 +158,7 @@ class StuckWatchdog:
         self._escalated = False
         self._dmg_at: float = 0.0
         self._dmg_drop_at: float = 0.0
+        self._dead_at: float | None = None
 
     def _reset_baselines(self, now: float) -> None:
         self._exp_at = now
@@ -193,6 +204,14 @@ class StuckWatchdog:
         stale_world = self._stale_world(controller, now)
         hunting = _is_hunting(controller, kind)
 
+        if _is_dead(controller):
+            if self._dead_at is None:
+                self._dead_at = now
+            if now - self._dead_at >= 20.0:
+                return self._act("角色陣亡超過 20 秒仍未復活", now, style="relogin")
+        else:
+            self._dead_at = None
+
         if not hunting and not login_error and not stale_world:
             self._pos_at = now
             self._target_at = now
@@ -224,6 +243,9 @@ class StuckWatchdog:
             style = "hard"
         elif hunting and _questing(controller) and now - hit_at <= 60.0:
             # 解任務中且仍在打怪：經驗少是正常的，不觸發沒經驗重登。
+            self._exp_at = now
+        elif hunting and (kind in {"travel", "portal"} or getattr(controller, "travel_phase", None)):
+            # 切圖走路途中本來不會打怪，不因沒經驗而重登；卡住不動仍由下面的位移檢查處理。
             self._exp_at = now
         elif hunting and now - (now if self._exp_at is None else self._exp_at) >= self.no_exp_sec:
             mins = int((now - self._exp_at) // 60)
@@ -306,6 +328,13 @@ class StuckWatchdog:
         if kind not in {"chase", "patrol"}:
             return False
         if _is_resting(controller):
+            return False
+        # 等級篩選後沒有可打的怪（例如在找 Lv60 但旁邊只有更低等）不算卡住。
+        try:
+            willing = controller.candidates()
+        except Exception:
+            willing = None
+        if willing is not None and not willing:
             return False
         if not self._in_attack_reach(controller):
             return False
