@@ -1197,28 +1197,20 @@
   async function checkUpdate() {
     try {
       const d = await api("/api/update/check");
-      if (d.available && d.remote !== updSkip) {
+      if (d.available && d.remote !== updSkip && d.url) {
         updText.textContent = "有新版本可以更新（" + (d.local || "?") + " → " + d.remote + "）" + (d.message ? "：" + d.message : "");
         updBar.hidden = false;
         updBar.dataset.remote = d.remote;
+        updBar.dataset.url = d.url;
       } else {
         updBar.hidden = true;
       }
     } catch (e) { /* 離線就不顯示 */ }
   }
   if (updBar) {
-    updBtn.addEventListener("click", async () => {
-      if (!confirm("要更新到最新版嗎？更新後程式會自動重開（打怪會中斷一下）。錢包和設定不會被動到。")) return;
-      updBtn.disabled = true;
-      updText.textContent = "更新中，請稍候…";
-      try {
-        await api("/api/update/apply", {});
-        updText.textContent = "更新完成，程式重開中，約 15 秒後自動重新整理…";
-        setTimeout(() => location.reload(), 15000);
-      } catch (e) {
-        updText.textContent = e.message;
-        updBtn.disabled = false;
-      }
+    updBtn.addEventListener("click", () => {
+      const url = updBar.dataset.url;
+      if (url) window.open(url, "_blank");
     });
     document.getElementById("update-later").addEventListener("click", () => {
       updSkip = updBar.dataset.remote || "";

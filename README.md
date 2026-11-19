@@ -7,13 +7,33 @@
 1. 在指定地圖上自動巡邏、追擊並攻擊怪物
 2. 依本機規則監控商城上架並顯示符合條件的商品（**不會自動購買**）
 
-連線只會打到官方伺服器 `game.tabby.meme`。沒有自動更新、沒有遙測、不會把私鑰或會話送到其他主機。協定是參考公開客戶端與開源專案 [tabbyShop](https://github.com/TokenScience01/tabbyShop) 重新實作，不是執行它的程式。
+連線只會打到官方伺服器 `game.tabby.meme`。啟動時會向 GitHub Releases 檢查是否有新版本，只在控制台提示、由你決定要不要下載，不會強迫更新。沒有遙測，不會把私鑰或會話送到其他主機。協定是參考公開客戶端與開源專案 [tabbyShop](https://github.com/TokenScience01/tabbyShop) 重新實作，不是執行它的程式。
 
 ## 請用空的專用錢包
 
 私鑰只在本機用來對官方登入挑戰做 EIP-191 簽名。請務必使用**裡面幾乎沒有資產的遊戲專用錢包**，不要匯入常用錢包或有大量代幣的地址。主密碼只留在記憶體，保險庫以 scrypt + AES-GCM 加密後寫到 `~/.tabbybot/wallet.vault`。忘記主密碼只能重新匯入私鑰。使用自動化有被遊戲處分的風險，請自行判斷。
 
 這個倉庫的測試都是離線的，**沒有拿真實私鑰連過正式伺服器**。線上行為仍需你自己驗證。
+
+## 下載應用程式（不必安裝 Python）
+
+從 [GitHub Releases](https://github.com/yu90856/tabbybot/releases) 下載對應系統的檔案。錢包與設定只存在你電腦的 `~/.tabbybot`（Windows 為 `%USERPROFILE%\.tabbybot`），不會包在應用程式裡。
+
+### Mac
+
+1. 下載 `TabbyBot-macOS-arm64.zip`（Apple 晶片）或 `TabbyBot-macOS-x86_64.zip`（Intel），解壓縮得到 `TabbyBot.app`。
+2. 第一次開啟：在 Finder 裡對應用程式按**右鍵**，選「打開」，再按「打開」。因為尚未付費簽名，macOS Gatekeeper 會提示「無法驗證開發者」，從右鍵打開即可。
+3. 瀏覽器會開啟本機控制台（http://127.0.0.1:8765/）。第一次使用請貼上專用錢包並設定主密碼。
+
+### Windows
+
+1. 下載 `TabbyBot-windows.zip`，解壓縮後執行 `TabbyBot.exe`。
+2. 若出現 Microsoft SmartScreen「Windows 已保護你的電腦」，按「更多資訊」，再按「仍要執行」。
+3. 瀏覽器會開啟本機控制台。第一次使用請貼上專用錢包並設定主密碼。
+
+控制台若提示有新版本，按「更新」會打開下載頁，由你決定要不要更新；按「稍後」則先繼續用目前版本。
+
+仍然可以用下面的方式從原始碼安裝。
 
 ## 在 Mac 上安裝
 
@@ -88,6 +108,8 @@ python -m tabbybot market
 ## 更新紀錄
 
 ### 2026-11-19
+- 可下載 Mac（`.app`）與 Windows（`.exe`）應用程式，不必安裝 Python；第一次開啟會進入登入／設定。Mac 請用右鍵「打開」通過 Gatekeeper，Windows 若出現 SmartScreen 請選「仍要執行」。
+- 更新檢查改為比對 GitHub Releases 版本號；有新版本時控制台顯示橫幅，按「更新」開啟下載頁、按「稍後」略過，不會強迫更新。
 - 新增 Lv60 地圖：荒野深處（map 12，遠程侏儒，從西部荒野 X115 Y94 進入）、雪原高地（map 13，近戰熊貓，從北部雪地 X117 Y71 進入），可自動走過去掛機。
 - 白嫖官方自動掛機 +5 回血：到怪堆送官方 `autoCombat` 指令開啟回血加成（8→13），打哪隻怪仍由程式自己決定；走遠、復活或重登後會自動再開。
 - 打法依怪物自動切換：遠程怪不風箏、直接站著打；風箏只用在近戰怪。怪物遠近程判定會記在 `~/.tabbybot/monster_styles.json`。

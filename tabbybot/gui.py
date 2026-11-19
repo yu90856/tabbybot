@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sys
 import threading
 import time
 import webbrowser
@@ -46,6 +47,7 @@ from tabbybot.quests import (
 from tabbybot.keychain import KeychainError, KeychainStore, default_keychain
 from tabbybot.loggingutil import configure_logging, redact_mapping, redact_text, short_address
 from tabbybot.market import filter_listings, new_matches
+from tabbybot import __version__
 from tabbybot.wallet import (
     WalletError,
     address_from_key,
@@ -56,7 +58,14 @@ from tabbybot.wallet import (
 
 log = logging.getLogger(__name__)
 
-WEB_DIR = Path(__file__).resolve().parent / "web"
+def _web_dir() -> Path:
+    meipass = getattr(sys, "_MEIPASS", None)
+    if getattr(sys, "frozen", False) and meipass:
+        return Path(meipass) / "tabbybot" / "web"
+    return Path(__file__).resolve().parent / "web"
+
+
+WEB_DIR = _web_dir()
 MAX_LOGS = 250
 MAX_MATCHES = 40
 
@@ -1299,6 +1308,7 @@ class GuiApp:
             else:
                 pill = "已解鎖，尚未連線"
         return {
+            "version": __version__,
             "has_vault": self.has_vault(),
             "unlocked": self.unlocked(),
             "logged_out": bool(getattr(self, "logged_out", False)),
@@ -1493,12 +1503,8 @@ def make_handler(app: GuiApp):
             }})
             if path == "/api/update/apply":
                 from tabbybot import updater
-                try:
-                    how = updater.apply()
-                except Exception as exc:
-                    raise GuiError(f"更新失敗：{exc}") from exc
-                updater.restart_later()
-                return {"ok": True, "how": how}
+                info = updater.check()
+                return {"ok": True, "url": info.get("url") or "", **info}
             if path == "/api/wallet/preview":
                 from tabbybot.wallet import mnemonic_addresses
                 try:

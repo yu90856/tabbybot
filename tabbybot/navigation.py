@@ -5,6 +5,7 @@ from __future__ import annotations
 import heapq
 import json
 import math
+import sys
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -29,6 +30,9 @@ Cell = tuple[int, int]
 
 
 def maps_directory() -> Path:
+    meipass = getattr(sys, "_MEIPASS", None)
+    if getattr(sys, "frozen", False) and meipass:
+        return Path(meipass) / "data" / "maps"
     return Path(__file__).resolve().parent.parent / "data" / "maps"
 
 
