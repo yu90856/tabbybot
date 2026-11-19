@@ -3361,7 +3361,7 @@ class HuntController:
         reach = float(self.elite_view_range or 700)
         me = (self.position.x, self.position.y)
         for _eid, mon in self.monsters.living_on_map(self.position.map_id):
-            if not self.is_elite(mon):
+            if not self.is_elite(mon) or self.monster_is_ranged(mon):
                 continue
             try:
                 if math.dist(me, (float(mon["x"]), float(mon["y"]))) <= reach:
@@ -3513,10 +3513,12 @@ class HuntController:
             return True  # never abandon a fight already started
         potions = self.health_potion_count()
         low = potions < int(self.elite_potion_min or 0)
-        if self.is_ranged():
-            # Ranged: always fight elites by kiting, regardless of potions.
+        if self.should_kite_monster(monster):
             self.kite_targets.add(encounter_id)
-            self.elite_note = "弓手：精英一律風箏打（不看藥水）"
+            self.elite_note = "近戰精英：用風箏打"
+            return True
+        if self.monster_is_ranged(monster):
+            self.elite_note = "遠程精英：不風箏，站著打，血低再撤"
             return True
         if not low:
             return True
@@ -3841,16 +3843,30 @@ class HuntController:
         norm = math.hypot(dx, dy) or 1.0
         return (me[0] + dx / norm * need, me[1] + dy / norm * need)
 
-    def kite_active(self, encounter_id: str) -> bool:
-        if not self.is_ranged():
+    def should_kite_monster(self, monster: dict[str, Any]) -> bool:
+        """Kite melee mobs only. Ranged mobs (侏儒 etc.) are never kited."""
+        if not monster or not self.is_ranged():
             return False
-        monster = self.monsters.monsters.get(encounter_id) or {}
+        if self.monster_is_ranged(monster):
+            return False
+        if self.is_elite(monster):
+            return bool(self.kite_elites) or bool(self.cluster_kite)
+        if not self.cluster_kite:
+            return False
+        level = monster_level(monster)
+        try:
+            no_kite = int(getattr(self, "no_kite_level", 0) or 0)
+        except (TypeError, ValueError):
+            no_kite = 0
+        if level is not None and no_kite > 0 and level <= no_kite:
+            return False
+        return True
+
+    def kite_active(self, encounter_id: str) -> bool:
         if encounter_id in self.kite_failed:
             return False
-        # 風箏精英：只風箏精英；一般怪與遠程怪物都用自動掛機／站著打。
-        if self.kite_elites and self.is_elite(monster):
-            return True
-        return False
+        monster = self.monsters.monsters.get(encounter_id) or {}
+        return self.should_kite_monster(monster)
 
     def abort_kite(self, encounter_id: str, reason: str) -> None:
         monster = self.monsters.monsters.get(encounter_id) or {}
@@ -4260,7 +4276,7 @@ class HuntController:
 
     # ---- cluster orbit kiting (t621) ---------------------------------------------
     def cluster_mode(self) -> bool:
-        return bool(self.kite_elites) and self.is_ranged()
+        return self.is_ranged() and (bool(self.cluster_kite) or bool(self.kite_elites))
 
     def update_clusters(self, now: float) -> None:
         if self.position is None or now - self._cluster_update_at < 0.3:
@@ -4595,11 +4611,10 @@ class HuntController:
         self.cluster_note = (f"怪堆 {len(site.alive)} 隻（可打 {len(targets)}），已拉 {len(pulled)}，"
                              f"{respawn_text}，繞圈半徑 {ring:.0f}")
         distance, encounter_id, monster = target
+        if not self.should_kite_monster(monster):
+            return None  # 遠程怪或不在風箏條件：交給一般邏輯站著打
         if self.kite_elite_only and not self.is_elite(monster):
             return None  # 僅風箏精英：普通怪改由一般邏輯站著射
-        _lv = monster_level(monster)
-        if not self.is_elite(monster) and _lv is not None and _lv <= int(self.no_kite_level):
-            return None  # 低等普通怪不風箏：交給一般邏輯直接追打，不因旁邊的怪後退
         reach = attack_reach(self.character_class, "prepare")
         # Nearest threat = any living monster of this cluster (they may all aggro).
         threat, threat_dist = None, float("inf")
